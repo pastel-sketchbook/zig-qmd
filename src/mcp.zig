@@ -1,5 +1,6 @@
 const std = @import("std");
 const db = @import("db.zig");
+const config = @import("config.zig");
 const search = @import("search.zig");
 const store = @import("store.zig");
 const root = @import("root.zig");
@@ -28,7 +29,7 @@ pub const McpServer = struct {
             const msg = readMessage(stdin, allocator) catch break;
             defer allocator.free(msg);
 
-            const response = handleRequest(msg) catch |err| {
+            const response = handleRequestWithDbPath(msg, null) catch |err| {
                 const err_json = std.fmt.allocPrint(
                     allocator,
                     "{{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{{\"code\":-32600,\"message\":\"{s}\"}}}}",
@@ -75,6 +76,10 @@ pub const McpServer = struct {
     }
 
     fn handleRequest(request: []const u8) ![]u8 {
+        return handleRequestWithDbPath(request, null);
+    }
+
+    fn handleRequestWithDbPath(request: []const u8, db_path_override: ?[]const u8) ![]u8 {
         const id = extractId(request) orelse return McpError.ParseError;
         const method = extractMethod(request) orelse return McpError.ParseError;
 
@@ -83,7 +88,7 @@ pub const McpServer = struct {
         }
         if (std.mem.eql(u8, method, "tools/call")) {
             const params = extractParams(request) catch return McpError.InvalidParams;
-            return try formatResponse(id, try callTool(params));
+            return try formatResponse(id, try callToolAtPath(params, db_path_override orelse DB_PATH));
         }
         if (std.mem.eql(u8, method, "initialize")) {
             return try formatResponse(id, getServerInfo());
@@ -139,10 +144,15 @@ pub const McpServer = struct {
     }
 
     fn callTool(params: []const u8) ![]u8 {
+        return callToolAtPath(params, DB_PATH);
+    }
+
+    fn callToolAtPath(params: []const u8, db_path_raw: []const u8) ![]u8 {
         const name = extractParam(params, "name") orelse return McpError.InvalidParams;
 
-        var db_path_buf: [256]u8 = undefined;
-        const db_path = std.fmt.bufPrintZ(&db_path_buf, "{s}", .{DB_PATH}) catch return McpError.InvalidParams;
+        const db_path = std.heap.page_allocator.dupeZ(u8, db_path_raw) catch return McpError.InvalidParams;
+        defer std.heap.page_allocator.free(db_path);
+
         var db_ = db.Db.open(db_path) catch {
             return std.heap.page_allocator.dupe(u8, "{\"content\":[{\"type\":\"text\",\"text\":\"database not initialized\"}]}") catch McpError.InvalidParams;
         };
@@ -338,4 +348,108 @@ test "writeMessage and readMessage roundtrip" {
     const body = try McpServer.readMessage(&reader, std.testing.allocator);
     defer std.testing.allocator.free(body);
     try std.testing.expectEqualStrings(payload, body);
+}
+
+fn processFramedRequestForTest(request_body: []const u8, db_path_override: ?[]const u8, allocator: std.mem.Allocator) ![]u8 {
+    var inbound = std.ArrayList(u8).initCapacity(allocator, 0) catch unreachable;
+    defer inbound.deinit(allocator);
+    var in_writer = FakeWriter{ .buf = &inbound, .allocator = allocator };
+    try McpServer.writeMessage(&in_writer, request_body);
+
+    var reader = FakeReader{ .data = inbound.items };
+    const parsed = try McpServer.readMessage(&reader, allocator);
+    defer allocator.free(parsed);
+
+    const response = try McpServer.handleRequestWithDbPath(parsed, db_path_override);
+    defer allocator.free(response);
+
+    var outbound = std.ArrayList(u8).initCapacity(allocator, 0) catch unreachable;
+    errdefer outbound.deinit(allocator);
+    var out_writer = FakeWriter{ .buf = &outbound, .allocator = allocator };
+    try McpServer.writeMessage(&out_writer, response);
+
+    var out_reader = FakeReader{ .data = outbound.items };
+    const roundtrip = try McpServer.readMessage(&out_reader, allocator);
+    outbound.deinit(allocator);
+    return roundtrip;
+}
+
+fn setupMcpTestDb(allocator: std.mem.Allocator) ![]u8 {
+    var rnd: u64 = undefined;
+    std.crypto.random.bytes(std.mem.asBytes(&rnd));
+    const dir_path = try std.fmt.allocPrint(allocator, "/tmp/zmd-mcp-test-{x}", .{rnd});
+    errdefer allocator.free(dir_path);
+    std.fs.cwd().makeDir(dir_path) catch {};
+    const db_path = try std.fmt.allocPrint(allocator, "{s}/data.db", .{dir_path});
+    allocator.free(dir_path);
+
+    const db_path_z = try allocator.dupeZ(u8, db_path);
+    var conn = try db.Db.open(db_path_z);
+    defer conn.close();
+    defer allocator.free(db_path_z);
+
+    try db.initSchema(&conn);
+    try config.addCollection(&conn, "wiki", "/tmp");
+    try store.insertDocument(&conn, "wiki", "a.md", "# Alpha\n\nhello world");
+
+    return db_path;
+}
+
+fn cleanupMcpTestDb(db_path: []const u8) void {
+    std.fs.cwd().deleteFile(db_path) catch {};
+    const slash = std.mem.lastIndexOfScalar(u8, db_path, '/') orelse return;
+    const dir_path = db_path[0..slash];
+    std.fs.cwd().deleteDir(dir_path) catch {};
+}
+
+test "framed tools/call status returns result envelope" {
+    const allocator = std.testing.allocator;
+    const db_path = try setupMcpTestDb(allocator);
+    defer cleanupMcpTestDb(db_path);
+    defer allocator.free(db_path);
+
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"status\"}}";
+    const resp = try processFramedRequestForTest(req, db_path, allocator);
+    defer allocator.free(resp);
+    try std.testing.expect(std.mem.indexOf(u8, resp, "\"result\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp, "zmd status: OK") != null);
+}
+
+test "framed tools/call query returns ranked text" {
+    const allocator = std.testing.allocator;
+    const db_path = try setupMcpTestDb(allocator);
+    defer cleanupMcpTestDb(db_path);
+    defer allocator.free(db_path);
+
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"query\",\"query\":\"hello\"}}";
+    const resp = try processFramedRequestForTest(req, db_path, allocator);
+    defer allocator.free(resp);
+    try std.testing.expect(std.mem.indexOf(u8, resp, "found") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp, "qmd://") != null);
+}
+
+test "framed tools/call search returns fts text" {
+    const allocator = std.testing.allocator;
+    const db_path = try setupMcpTestDb(allocator);
+    defer cleanupMcpTestDb(db_path);
+    defer allocator.free(db_path);
+
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"search\",\"query\":\"hello\",\"collection\":\"wiki\"}}";
+    const resp = try processFramedRequestForTest(req, db_path, allocator);
+    defer allocator.free(resp);
+    try std.testing.expect(std.mem.indexOf(u8, resp, "found") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp, "fts results") != null);
+}
+
+test "framed tools/call get returns document content" {
+    const allocator = std.testing.allocator;
+    const db_path = try setupMcpTestDb(allocator);
+    defer cleanupMcpTestDb(db_path);
+    defer allocator.free(db_path);
+
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"get\",\"path\":\"wiki/a.md\"}}";
+    const resp = try processFramedRequestForTest(req, db_path, allocator);
+    defer allocator.free(resp);
+    try std.testing.expect(std.mem.indexOf(u8, resp, "Title: Alpha") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp, "hello world") != null);
 }
