@@ -464,12 +464,12 @@ pub fn main() !void {
 
     if (std.mem.eql(u8, cmd, "context")) {
         const first_arg = args.next() orelse {
-            try stdout.writeAll("Usage: zmd context <query> [--json]\n");
+            try stdout.writeAll("Usage: zmd context <query> [--json|--csv|--md]\n");
             try stdout.flush();
             return;
         };
         if (std.mem.eql(u8, first_arg, "--help") or std.mem.eql(u8, first_arg, "-h")) {
-            try stdout.writeAll("Usage: zmd context <query> [--json]\n");
+            try stdout.writeAll("Usage: zmd context <query> [--json|--csv|--md]\n");
             try stdout.flush();
             return;
         }
@@ -527,6 +527,42 @@ pub fn main() !void {
                     try stdout.writeAll("}");
                 }
                 try stdout.writeAll("\n]\n");
+            },
+            .csv => {
+                try stdout.writeAll("rank,collection,path,title,score,snippet\n");
+                for (result.results.items, 0..) |r, i| {
+                    const doc = qmd.store.findActiveDocument(&db_, r.collection, r.path) catch continue;
+                    defer {
+                        std.heap.page_allocator.free(doc.title);
+                        std.heap.page_allocator.free(doc.hash);
+                        std.heap.page_allocator.free(doc.doc);
+                    }
+                    const snippet = try extractSnippet(allocator, query_text, doc.doc);
+                    defer allocator.free(snippet);
+                    try stdout.print("{d},", .{i + 1});
+                    try writeCsvField(stdout, r.collection);
+                    try stdout.writeAll(",");
+                    try writeCsvField(stdout, r.path);
+                    try stdout.writeAll(",");
+                    try writeCsvField(stdout, r.title);
+                    try stdout.print(",{d},", .{r.score});
+                    try writeCsvField(stdout, snippet);
+                    try stdout.writeAll("\n");
+                }
+            },
+            .md => {
+                try stdout.writeAll("| rank | score | path | title | snippet |\n|---:|---:|---|---|---|\n");
+                for (result.results.items, 0..) |r, i| {
+                    const doc = qmd.store.findActiveDocument(&db_, r.collection, r.path) catch continue;
+                    defer {
+                        std.heap.page_allocator.free(doc.title);
+                        std.heap.page_allocator.free(doc.hash);
+                        std.heap.page_allocator.free(doc.doc);
+                    }
+                    const snippet = try extractSnippet(allocator, query_text, doc.doc);
+                    defer allocator.free(snippet);
+                    try stdout.print("| {d} | {d:.4} | qmd://{s}/{s} | {s} | {s} |\n", .{ i + 1, r.score, r.collection, r.path, r.title, snippet });
+                }
             },
             else => {
                 if (result.results.items.len == 0) {
