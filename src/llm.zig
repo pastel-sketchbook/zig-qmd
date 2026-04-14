@@ -1,5 +1,6 @@
 const std = @import("std");
 const ChildProcess = std.process.Child;
+const db = @import("db.zig");
 
 pub const LlamaError = error{
     InitFailed,
@@ -211,6 +212,49 @@ pub const CachedResult = struct {
     response: []const u8,
     created_at: i64,
 };
+
+pub const CacheError = error{
+    OutOfMemory,
+} || db.DbError;
+
+pub fn buildCacheKey(kind: []const u8, model: []const u8, input: []const u8) [64]u8 {
+    var buf = std.ArrayList(u8).initCapacity(std.heap.page_allocator, kind.len + model.len + input.len + 2) catch unreachable;
+    defer buf.deinit(std.heap.page_allocator);
+    buf.appendSlice(std.heap.page_allocator, kind) catch unreachable;
+    buf.append(std.heap.page_allocator, '|') catch unreachable;
+    buf.appendSlice(std.heap.page_allocator, model) catch unreachable;
+    buf.append(std.heap.page_allocator, '|') catch unreachable;
+    buf.appendSlice(std.heap.page_allocator, input) catch unreachable;
+
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(buf.items, &digest, .{});
+
+    var out: [64]u8 = undefined;
+    for (digest, 0..) |byte, i| {
+        out[i * 2] = "0123456789abcdef"[(byte >> 4) & 0x0f];
+        out[i * 2 + 1] = "0123456789abcdef"[byte & 0x0f];
+    }
+    return out;
+}
+
+pub fn cacheGet(db_: *db.Db, key: []const u8, allocator: std.mem.Allocator) CacheError!?[]u8 {
+    var stmt = try db_.prepare("SELECT result FROM llm_cache WHERE hash = ?");
+    defer stmt.finalize();
+    try stmt.bindText(1, key);
+
+    if (!try stmt.step()) return null;
+    const text = stmt.columnText(0) orelse return null;
+    return allocator.dupe(u8, std.mem.span(text)) catch return CacheError.OutOfMemory;
+}
+
+pub fn cachePut(db_: *db.Db, key: []const u8, value: []const u8) CacheError!void {
+    var stmt = try db_.prepare("INSERT OR REPLACE INTO llm_cache(hash, result, created_at) VALUES(?, ?, ?)");
+    defer stmt.finalize();
+    try stmt.bindText(1, key);
+    try stmt.bindText(2, value);
+    try stmt.bindText(3, "2024-01-01T00:00:00Z");
+    _ = try stmt.step();
+}
 
 pub const SimpleResult = struct {
     id: i64,
@@ -706,4 +750,24 @@ test "LlamaEmbedding.embed returns process error when subprocess fails" {
 
     const result = engine.embed("hello world");
     try std.testing.expectError(EmbeddingError.ProcessFailed, result);
+}
+
+test "buildCacheKey is deterministic" {
+    const k1 = buildCacheKey("expand", "model-a", "what is oauth");
+    const k2 = buildCacheKey("expand", "model-a", "what is oauth");
+    try std.testing.expectEqualStrings(&k1, &k2);
+}
+
+test "cachePut and cacheGet roundtrip" {
+    var db_ = try db.Db.open(":memory:");
+    defer db_.close();
+    try db.initSchema(&db_);
+
+    const key = buildCacheKey("expand", "model-a", "query text");
+    try cachePut(&db_, key[0..], "cached value");
+
+    const value = try cacheGet(&db_, key[0..], std.testing.allocator);
+    try std.testing.expect(value != null);
+    defer std.testing.allocator.free(value.?);
+    try std.testing.expectEqualStrings("cached value", value.?);
 }

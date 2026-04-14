@@ -189,10 +189,22 @@ pub fn hybridSearch(
         const model_path = std.process.getEnvVarOwned(std.heap.page_allocator, "QMD_LLAMA_MODEL") catch null;
         defer if (model_path) |p| std.heap.page_allocator.free(p);
 
-        const expanded = llm.expandQueryWithModel(std.heap.page_allocator, query, bin_path, model_path) catch null;
+        const model_key = if (model_path) |m| m else "heuristic";
+        const cache_key = llm.buildCacheKey("expand", model_key, query);
+        const cached = llm.cacheGet(db_, cache_key[0..], std.heap.page_allocator) catch null;
+        if (cached) |q_cached| {
+            expanded_query_owned = q_cached;
+            effective_query = q_cached;
+        }
+
+        const expanded = if (cached == null)
+            (llm.expandQueryWithModel(std.heap.page_allocator, query, bin_path, model_path) catch null)
+        else
+            null;
         if (expanded) |q| {
             expanded_query_owned = q;
             effective_query = q;
+            llm.cachePut(db_, cache_key[0..], q) catch {};
         }
     }
 
