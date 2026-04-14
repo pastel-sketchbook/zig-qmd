@@ -44,8 +44,8 @@ tasks:
         mkdir -p .qmd /tmp/qmd-test/notes
         
         # Create test markdown files
-        echo '# Test Doc\n\nThis is about authentication flow.' > /tmp/qmd-test/notes/test.md
-        echo '# Auth Guide\n\nAuthentication details here.' > /tmp/qmd-test/notes/auth.md
+        printf '# Auth Guide\n\nAuthentication details here.\n' > /tmp/qmd-test/notes/auth.md
+        printf '# Test Doc\n\nThis is about authentication flow.\n' > /tmp/qmd-test/notes/test.md
         
         # Initialize and index
         ./zig-out/bin/zmd update
@@ -62,6 +62,9 @@ tasks:
         echo ""
         echo "=== Hybrid Query ==="
         ./zig-out/bin/zmd query auth
+        echo ""
+        echo "=== Status ==="
+        ./zig-out/bin/zmd status
         
         # Cleanup
         rm -rf .qmd /tmp/qmd-test

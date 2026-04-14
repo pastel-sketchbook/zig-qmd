@@ -50,7 +50,7 @@ pub const Db = struct {
         if (rc != c.SQLITE_OK or stmt == null) {
             return DbError.PrepareFailed;
         }
-        return Stmt{ .handle = stmt.? };
+        return Stmt{ .handle = stmt };
     }
 
     /// Return the last error message from SQLite (useful for diagnostics).
@@ -61,24 +61,24 @@ pub const Db = struct {
 
 /// A prepared statement handle.
 pub const Stmt = struct {
-    handle: *c.sqlite3_stmt,
+    handle: ?*c.sqlite3_stmt,
 
     /// Bind a text value to parameter at 1-based index.
     pub fn bindText(self: *Stmt, idx: c_int, text: []const u8) DbError!void {
-        const rc = c.sqlite3_bind_text(self.handle, idx, text.ptr, @intCast(text.len), null);
+        const rc = c.sqlite3_bind_text(self.handle.?, idx, text.ptr, @intCast(text.len), null);
         if (rc != c.SQLITE_OK) return DbError.BindFailed;
     }
 
     /// Bind an integer value to parameter at 1-based index.
     pub fn bindInt(self: *Stmt, idx: c_int, val: c_int) DbError!void {
-        const rc = c.sqlite3_bind_int(self.handle, idx, val);
+        const rc = c.sqlite3_bind_int(self.handle.?, idx, val);
         if (rc != c.SQLITE_OK) return DbError.BindFailed;
     }
 
     /// Step the statement. Returns true if a row is available (SQLITE_ROW),
     /// false if done (SQLITE_DONE).
     pub fn step(self: *Stmt) DbError!bool {
-        const rc = c.sqlite3_step(self.handle);
+        const rc = c.sqlite3_step(self.handle.?);
         if (rc == c.SQLITE_ROW) return true;
         if (rc == c.SQLITE_DONE or rc == c.SQLITE_DONE) return false;
         return false;
@@ -86,27 +86,30 @@ pub const Stmt = struct {
 
     /// Get a text column value (0-based index). Returns null if the column is NULL.
     pub fn columnText(self: *Stmt, idx: c_int) ?[*:0]const u8 {
-        return c.sqlite3_column_text(self.handle, idx);
+        return c.sqlite3_column_text(self.handle.?, idx);
     }
 
     /// Get an integer column value (0-based index).
     pub fn columnInt(self: *Stmt, idx: c_int) c_int {
-        return c.sqlite3_column_int(self.handle, idx);
+        return c.sqlite3_column_int(self.handle.?, idx);
     }
 
     /// Get a double column value (0-based index).
     pub fn columnDouble(self: *Stmt, idx: c_int) f64 {
-        return c.sqlite3_column_double(self.handle, idx);
+        return c.sqlite3_column_double(self.handle.?, idx);
     }
 
     /// Reset the statement so it can be re-executed with new bindings.
     pub fn reset(self: *Stmt) void {
-        _ = c.sqlite3_reset(self.handle);
+        if (self.handle) |h| _ = c.sqlite3_reset(h);
     }
 
     /// Finalize (destroy) the prepared statement.
     pub fn finalize(self: *Stmt) void {
-        _ = c.sqlite3_finalize(self.handle);
+        if (self.handle) |h| {
+            _ = c.sqlite3_finalize(h);
+            self.handle = null;
+        }
     }
 };
 
