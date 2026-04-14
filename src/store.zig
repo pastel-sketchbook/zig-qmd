@@ -11,6 +11,13 @@ pub const StoreError = error{
 
 const SHA256_HEX_LEN = 64;
 
+pub const ActiveDocument = struct {
+    id: i64,
+    title: []const u8,
+    hash: []const u8,
+    doc: []const u8,
+};
+
 pub fn hashContent(content: []const u8, out: *[SHA256_HEX_LEN:0]u8) void {
     var hash: [32]u8 = undefined;
     crypto.hash.sha2.Sha256.hash(content, &hash, .{});
@@ -66,7 +73,7 @@ pub fn insertContent(db_: *db.Db, content: []const u8) StoreError![SHA256_HEX_LE
     return hash;
 }
 
-pub fn findActiveDocument(db_: *db.Db, collection: []const u8, path: []const u8) StoreError!struct { id: i64, title: []const u8, hash: []const u8, doc: []const u8 } {
+pub fn findActiveDocument(db_: *db.Db, collection: []const u8, path: []const u8) StoreError!ActiveDocument {
     const sql = "SELECT d.id, d.title, d.hash, c.doc FROM documents d JOIN content c ON d.hash = c.hash WHERE d.collection = ? AND d.path = ? AND d.active = 1";
     var stmt = try db_.prepare(sql);
     defer stmt.finalize();
@@ -253,7 +260,7 @@ fn countOrphanVectors(db_: *db.Db) StoreError!i64 {
 test "hashContent produces 64-char hex" {
     var hash: [SHA256_HEX_LEN:0]u8 = undefined;
     hashContent("hello world", &hash);
-    try std.testing.expectEqualStrings("b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380fc9081103", &hash);
+    try std.testing.expectEqualStrings("b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9", &hash);
 }
 
 test "handleize normalizes path" {
@@ -335,12 +342,12 @@ test "getActiveDocumentPaths returns all paths" {
     try insertDocument(&db_, "notes", "a.md", "# A\n\nContent");
     try insertDocument(&db_, "notes", "b.md", "# B\n\nContent");
 
-    const result = try getActiveDocumentPaths(&db_, "notes");
+    var result = try getActiveDocumentPaths(&db_, "notes");
     defer {
         for (result.paths.items) |p| std.heap.page_allocator.free(p);
         for (result.titles.items) |t| std.heap.page_allocator.free(t);
-        result.paths.deinit();
-        result.titles.deinit();
+        result.paths.deinit(std.heap.page_allocator);
+        result.titles.deinit(std.heap.page_allocator);
     }
     try std.testing.expectEqual(@as(usize, 2), result.paths.items.len);
 }

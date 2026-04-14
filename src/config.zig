@@ -132,8 +132,8 @@ test "listCollections returns all collections" {
     try addCollection(&db_, "notes", "/home/user/notes");
     try addCollection(&db_, "docs", "/home/user/docs");
 
-    const result = try listCollections(&db_);
-    defer result.collections.deinit();
+    var result = try listCollections(&db_);
+    defer result.collections.deinit(std.heap.page_allocator);
 
     try std.testing.expectEqual(@as(usize, 2), result.collections.items.len);
 }

@@ -179,10 +179,10 @@ pub fn dotProduct(a: []const f32, b: []const f32) f32 {
 }
 
 pub const LlmCache = struct {
-    entries: std.AutoHashMap([]const u8, CachedResult),
+    entries: std.StringHashMap(CachedResult),
 
     pub fn init() LlmCache {
-        return .{ .entries = std.AutoHashMap([]const u8, CachedResult).init(std.heap.page_allocator) };
+        return .{ .entries = std.StringHashMap(CachedResult).init(std.heap.page_allocator) };
     }
 
     pub fn deinit(self: *LlmCache) void {
