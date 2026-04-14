@@ -1,0 +1,141 @@
+version: "3"
+
+tasks:
+  default:
+    cmds:
+      - task -l
+
+  build:
+    desc: Build the native CLI executable
+    deps:
+      - fmt
+    cmds:
+      - zig build
+
+  test:
+    desc: Run all tests
+    cmds:
+      - zig build test
+
+  fmt:
+    desc: Format Zig code
+    cmds:
+      - zig fmt .
+
+  run:
+    desc: Build and run the CLI
+    cmds:
+      - zig build run -- {{.CLI_ARGS}}
+
+  check:
+    desc: Check format without modifying files and run tests
+    cmds:
+      - zig fmt --check .
+      - zig build test
+
+  e2e:
+    desc: Run end-to-end test with fresh database and test files
+    deps:
+      - build
+    cmds:
+      - |
+        set -e
+        rm -rf .qmd /tmp/qmd-test
+        mkdir -p .qmd /tmp/qmd-test/notes
+        
+        # Create test markdown files
+        echo '# Test Doc\n\nThis is about authentication flow.' > /tmp/qmd-test/notes/test.md
+        echo '# Auth Guide\n\nAuthentication details here.' > /tmp/qmd-test/notes/auth.md
+        
+        # Initialize and index
+        ./zig-out/bin/zmd update
+        ./zig-out/bin/zmd collection add notes /tmp/qmd-test/notes
+        ./zig-out/bin/zmd update
+        
+        # Test all search modes
+        echo ""
+        echo "=== FTS Search ==="
+        ./zig-out/bin/zmd search auth
+        echo ""
+        echo "=== Vector Search ==="
+        ./zig-out/bin/zmd vsearch auth
+        echo ""
+        echo "=== Hybrid Query ==="
+        ./zig-out/bin/zmd query auth
+        
+        # Cleanup
+        rm -rf .qmd /tmp/qmd-test
+        echo ""
+        echo "E2E test complete!"
+
+  install:
+    desc: Build and copy zmd to ~/bin/
+    deps:
+      - build
+    cmds:
+      - mkdir -p ~/bin
+      - cp zig-out/bin/zmd ~/bin/zmd
+      - echo "Installed zmd to ~/bin/zmd"
+
+  clean:
+    desc: Clean build artifacts
+    cmds:
+      - rm -rf .zig-cache zig-out
+
+  loc:
+    desc: Count lines of code with tokei
+    cmds:
+      - tokei
+
+  version:
+    desc: Show current version
+    silent: true
+    cmds:
+      - cat VERSION
+
+  version:patch:
+    desc: Bump patch version (0.1.0 -> 0.1.1) and tag
+    cmds:
+      - task: _version:bump
+        vars:
+          PART: patch
+
+  version:minor:
+    desc: Bump minor version (0.1.0 -> 0.2.0) and tag
+    cmds:
+      - task: _version:bump
+        vars:
+          PART: minor
+
+  version:major:
+    desc: Bump major version (0.1.0 -> 1.0.0) and tag
+    cmds:
+      - task: _version:bump
+        vars:
+          PART: major
+
+  _version:bump:
+    internal: true
+    silent: true
+    vars:
+      CURRENT:
+        sh: cat VERSION | tr -d '\n'
+      NEXT:
+        sh: |
+          cur=$(cat VERSION | tr -d '\n')
+          major=${cur%%.*}; rest=${cur#*.}; minor=${rest%%.*}; patch=${rest#*.}
+          case "{{.PART}}" in
+            patch) echo "$major.$minor.$((patch + 1))" ;;
+            minor) echo "$major.$((minor + 1)).0" ;;
+            major) echo "$((major + 1)).0.0" ;;
+          esac
+    preconditions:
+      - sh: git diff --quiet && git diff --cached --quiet
+        msg: "Working tree must be clean before bumping version"
+    cmds:
+      - cmd: printf '%s\n' '{{.NEXT}}' > VERSION
+      - cmd: perl -pi -e 's/\.version = "{{.CURRENT}}"/.version = "{{.NEXT}}"/' build.zig.zon
+      - cmd: git add VERSION build.zig.zon
+      - cmd: git commit -m "chore{{":"}} bump version to {{.NEXT}}"
+      - cmd: git tag "v{{.NEXT}}"
+      - cmd: echo "{{.CURRENT}} → {{.NEXT}} (tagged v{{.NEXT}})"
