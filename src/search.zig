@@ -214,7 +214,7 @@ pub fn hybridSearch(
     var fused = reciprocalRankFusion(&lists, options.rrf_k);
 
     if (options.enable_rerank and fused.len > 1) {
-        fused = try rerankByEmbedding(effective_query, fused);
+        fused = try rerankByEmbedding(db_, effective_query, fused);
     }
 
     var final_results = try std.ArrayList(SearchResult).initCapacity(std.heap.page_allocator, @min(fused.len, options.max_results));
@@ -248,20 +248,26 @@ pub const HybridOptions = struct {
     min_score: f64 = 0.0,
 };
 
-fn rerankByEmbedding(query: []const u8, results: []ScoredResult) ![]ScoredResult {
+fn rerankByEmbedding(db_: *db.Db, query: []const u8, results: []ScoredResult) ![]ScoredResult {
     const allocator = std.heap.page_allocator;
-    const q_emb = try embed_query(query);
+    const q_emb = try embed_text(query, true);
     defer allocator.free(q_emb);
 
     var rescored = try allocator.alloc(ScoredResult, results.len);
     for (results, 0..) |r, i| {
-        const formatted = try llm.formatDocForEmbedding(allocator, r.title);
-        defer allocator.free(formatted);
+        var source_text = r.title;
+        const doc = store.findActiveDocument(db_, r.collection, r.path) catch null;
+        if (doc) |d| {
+            defer {
+                allocator.free(d.title);
+                allocator.free(d.hash);
+                allocator.free(d.doc);
+            }
+            source_text = d.doc;
+        }
 
-        var fallback = try llm.LlamaCpp.init("/nonexistent", allocator);
-        defer fallback.deinit();
-        const d_emb = try fallback.embed(formatted, allocator);
-        defer allocator.free(d_emb);
+        const d_emb = embed_text(source_text, false) catch q_emb;
+        defer if (d_emb.ptr != q_emb.ptr) allocator.free(d_emb);
 
         var item = r;
         item.score = llm.cosineSimilarity(q_emb, d_emb);
@@ -342,9 +348,16 @@ pub fn searchVec(
 }
 
 fn embed_query(query: []const u8) ![]f32 {
+    return embed_text(query, true);
+}
+
+fn embed_text(text: []const u8, is_query: bool) ![]f32 {
     const allocator = std.heap.page_allocator;
-    const formatted_query = try llm.formatQueryForEmbedding(allocator, query);
-    defer allocator.free(formatted_query);
+    const formatted = if (is_query)
+        try llm.formatQueryForEmbedding(allocator, text)
+    else
+        try llm.formatDocForEmbedding(allocator, text);
+    defer allocator.free(formatted);
 
     const bin_path = std.process.getEnvVarOwned(allocator, "QMD_LLAMA_EMBED_BIN") catch null;
     defer if (bin_path) |p| allocator.free(p);
@@ -356,19 +369,19 @@ fn embed_query(query: []const u8) ![]f32 {
         var engine = llm.LlamaEmbedding.init(allocator, bin_path.?, model_path.?) catch {
             var fallback = try llm.LlamaCpp.init("/nonexistent", allocator);
             defer fallback.deinit();
-            return fallback.embed(formatted_query, allocator);
+            return fallback.embed(formatted, allocator);
         };
         defer engine.deinit();
-        return engine.embed(formatted_query) catch {
+        return engine.embed(formatted) catch {
             var fallback = try llm.LlamaCpp.init("/nonexistent", allocator);
             defer fallback.deinit();
-            return fallback.embed(formatted_query, allocator);
+            return fallback.embed(formatted, allocator);
         };
     }
 
     var fallback = try llm.LlamaCpp.init("/nonexistent", allocator);
     defer fallback.deinit();
-    return fallback.embed(formatted_query, allocator);
+    return fallback.embed(formatted, allocator);
 }
 
 fn parse_embedding_json_array(json: []const u8) ![]f32 {
