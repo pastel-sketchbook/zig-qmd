@@ -236,17 +236,40 @@ pub fn expandQueryWithModel(
         return expandQueryHeuristic(query);
     }
 
+    const spec = parseModelSpec(maybe_model_path.?) catch return expandQueryHeuristic(query);
+
+    const prompt = std.fmt.allocPrint(
+        allocator,
+        "Expand this search query with short related keywords only. Return one line, comma-separated keywords. Query: {s}",
+        .{query},
+    ) catch return expandQueryHeuristic(query);
+    defer allocator.free(prompt);
+
+    var argv = try std.ArrayList([]const u8).initCapacity(allocator, 16);
+    defer argv.deinit(allocator);
+    try argv.append(allocator, maybe_binary_path.?);
+    switch (spec.source) {
+        .huggingface => {
+            try argv.append(allocator, "--hf-repo");
+            try argv.append(allocator, spec.value);
+        },
+        .url => {
+            try argv.append(allocator, "--model-url");
+            try argv.append(allocator, spec.value);
+        },
+        .local => {
+            try argv.append(allocator, "-m");
+            try argv.append(allocator, spec.value);
+        },
+    }
+    try argv.append(allocator, "-n");
+    try argv.append(allocator, "48");
+    try argv.append(allocator, "-p");
+    try argv.append(allocator, prompt);
+
     const run_result = std.process.Child.run(.{
         .allocator = allocator,
-        .argv = &.{
-            maybe_binary_path.?,
-            "-m",
-            maybe_model_path.?,
-            "-n",
-            "32",
-            "-p",
-            query,
-        },
+        .argv = argv.items,
         .max_output_bytes = 16 * 1024,
     }) catch return expandQueryHeuristic(query);
     defer allocator.free(run_result.stdout);
@@ -259,7 +282,12 @@ pub fn expandQueryWithModel(
     const trimmed = std.mem.trim(u8, run_result.stdout, &.{ ' ', '\n', '\r', '\t' });
     if (trimmed.len == 0) return expandQueryHeuristic(query);
 
-    return allocator.dupe(u8, trimmed);
+    var merged = try std.ArrayList(u8).initCapacity(allocator, query.len + 1 + trimmed.len);
+    defer merged.deinit(allocator);
+    try merged.appendSlice(allocator, query);
+    try merged.append(allocator, ' ');
+    try merged.appendSlice(allocator, trimmed);
+    return merged.toOwnedSlice(allocator);
 }
 
 fn expandQueryHeuristic(query: []const u8) ![]const u8 {
