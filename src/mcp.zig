@@ -182,7 +182,7 @@ pub const McpServer = struct {
             defer text.deinit(std.heap.page_allocator);
             text.writer(std.heap.page_allocator).print("found {d} hybrid results", .{result.results.items.len}) catch {};
             for (result.results.items, 0..) |r, i| {
-                text.writer(std.heap.page_allocator).print("\n{d}. {s} (qmd://{s}/{s}) score={d:.4}", .{ i + 1, r.title, r.collection, r.path, r.score }) catch {};
+                text.writer(std.heap.page_allocator).print("\n{d}. {s} (zmd://{s}/{s}) score={d:.4}", .{ i + 1, r.title, r.collection, r.path, r.score }) catch {};
             }
             return std.fmt.allocPrint(std.heap.page_allocator, "{{\"content\":[{{\"type\":\"text\",\"text\":\"{s}\"}}]}}", .{text.items}) catch McpError.InvalidParams;
         }
@@ -196,7 +196,7 @@ pub const McpServer = struct {
             defer text.deinit(std.heap.page_allocator);
             text.writer(std.heap.page_allocator).print("found {d} fts results", .{result.results.items.len}) catch {};
             for (result.results.items, 0..) |r, i| {
-                text.writer(std.heap.page_allocator).print("\n{d}. {s} (qmd://{s}/{s}) score={d:.4}", .{ i + 1, r.title, r.collection, r.path, r.score }) catch {};
+                text.writer(std.heap.page_allocator).print("\n{d}. {s} (zmd://{s}/{s}) score={d:.4}", .{ i + 1, r.title, r.collection, r.path, r.score }) catch {};
             }
             return std.fmt.allocPrint(std.heap.page_allocator, "{{\"content\":[{{\"type\":\"text\",\"text\":\"{s}\"}}]}}", .{text.items}) catch McpError.InvalidParams;
         }
@@ -384,7 +384,7 @@ test "readMessage rejects missing content length" {
 }
 
 test "writeMessage emits content-length framing" {
-    var buf = std.ArrayList(u8).initCapacity(std.testing.allocator, 0) catch unreachable;
+    var buf = try std.ArrayList(u8).initCapacity(std.testing.allocator, 0);
     defer buf.deinit(std.testing.allocator);
 
     var writer = FakeWriter{ .buf = &buf, .allocator = std.testing.allocator };
@@ -394,7 +394,7 @@ test "writeMessage emits content-length framing" {
 }
 
 test "writeMessage and readMessage roundtrip" {
-    var out = std.ArrayList(u8).initCapacity(std.testing.allocator, 0) catch unreachable;
+    var out = try std.ArrayList(u8).initCapacity(std.testing.allocator, 0);
     defer out.deinit(std.testing.allocator);
 
     var writer = FakeWriter{ .buf = &out, .allocator = std.testing.allocator };
@@ -408,7 +408,7 @@ test "writeMessage and readMessage roundtrip" {
 }
 
 fn processFramedRequestForTest(request_body: []const u8, db_path_override: ?[]const u8, allocator: std.mem.Allocator) ![]u8 {
-    var inbound = std.ArrayList(u8).initCapacity(allocator, 0) catch unreachable;
+    var inbound = try std.ArrayList(u8).initCapacity(allocator, 0);
     defer inbound.deinit(allocator);
     var in_writer = FakeWriter{ .buf = &inbound, .allocator = allocator };
     try McpServer.writeMessage(&in_writer, request_body);
@@ -420,7 +420,7 @@ fn processFramedRequestForTest(request_body: []const u8, db_path_override: ?[]co
     const response = try McpServer.handleRequestWithDbPath(parsed, db_path_override);
     defer allocator.free(response);
 
-    var outbound = std.ArrayList(u8).initCapacity(allocator, 0) catch unreachable;
+    var outbound = try std.ArrayList(u8).initCapacity(allocator, 0);
     errdefer outbound.deinit(allocator);
     var out_writer = FakeWriter{ .buf = &outbound, .allocator = allocator };
     try McpServer.writeMessage(&out_writer, response);
@@ -482,7 +482,7 @@ test "framed tools/call query returns ranked text" {
     const resp = try processFramedRequestForTest(req, db_path, allocator);
     defer allocator.free(resp);
     try std.testing.expect(std.mem.indexOf(u8, resp, "found") != null);
-    try std.testing.expect(std.mem.indexOf(u8, resp, "qmd://") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp, "zmd://") != null);
 }
 
 test "framed tools/call search returns fts text" {

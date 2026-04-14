@@ -289,7 +289,7 @@ test "initSchema creates all tables" {
 
     for (tables) |table_name| {
         var buf: [256]u8 = undefined;
-        const query = std.fmt.bufPrintZ(&buf, "SELECT count(*) FROM sqlite_master WHERE name = '{s}'", .{table_name}) catch unreachable;
+        const query = try std.fmt.bufPrintZ(&buf, "SELECT count(*) FROM sqlite_master WHERE name = '{s}'", .{table_name});
         var stmt = try db.prepare(query);
         defer stmt.finalize();
         const has_row = try stmt.step();

@@ -28,11 +28,11 @@ pub const AstChunker = struct {
     allocator: std.mem.Allocator,
     breakpoints: std.ArrayList(Breakpoint),
 
-    pub fn init(allocator: std.mem.Allocator, language: []const u8) AstChunker {
+    pub fn init(allocator: std.mem.Allocator, language: []const u8) !AstChunker {
         return .{
             .language = language,
             .allocator = allocator,
-            .breakpoints = std.ArrayList(Breakpoint).initCapacity(allocator, 0) catch unreachable,
+            .breakpoints = try std.ArrayList(Breakpoint).initCapacity(allocator, 0),
         };
     }
 
@@ -187,7 +187,7 @@ pub fn detectLanguage(filename: []const u8) []const u8 {
 }
 
 test "AstChunker extracts heading and fence breakpoints" {
-    var chunker = AstChunker.init(std.testing.allocator, "markdown");
+    var chunker = try AstChunker.init(std.testing.allocator, "markdown");
     defer chunker.deinit();
 
     const content = "# Title\n\ntext\n```zig\nconst a = 1;\n```\n## Next\n";
@@ -196,7 +196,7 @@ test "AstChunker extracts heading and fence breakpoints" {
 }
 
 test "AstChunker chunk splits by semantic breakpoints" {
-    var chunker = AstChunker.init(std.testing.allocator, "markdown");
+    var chunker = try AstChunker.init(std.testing.allocator, "markdown");
     defer chunker.deinit();
 
     const content =

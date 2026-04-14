@@ -8,3 +8,4 @@ zig-out/
 /PORT_PLAN.md
 /PORT_PLAN_PROGRESS.md
 /.qmd
+.env*

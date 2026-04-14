@@ -24,7 +24,7 @@ const CodeFence = struct {
 };
 
 pub fn findCodeFences(content: []const u8) struct { fences: std.ArrayList(CodeFence) } {
-    var fences = std.ArrayList(CodeFence).initCapacity(std.heap.page_allocator, 0) catch return .{ .fences = std.ArrayList(CodeFence).initCapacity(std.heap.page_allocator, 0) catch unreachable };
+    var fences = std.ArrayList(CodeFence).initCapacity(std.heap.page_allocator, 0) catch return .{ .fences = std.ArrayList(CodeFence).empty };
     var i: usize = 0;
     var in_fence = false;
     var fence_start: usize = 0;
@@ -92,7 +92,7 @@ pub fn findBestCutoff(content: []const u8, window_start: usize, window_end: usiz
 }
 
 pub fn chunkDocument(content: []const u8) struct { chunks: std.ArrayList([]const u8) } {
-    var chunks = std.ArrayList([]const u8).initCapacity(std.heap.page_allocator, 0) catch return .{ .chunks = std.ArrayList([]const u8).initCapacity(std.heap.page_allocator, 0) catch unreachable };
+    var chunks = std.ArrayList([]const u8).initCapacity(std.heap.page_allocator, 0) catch return .{ .chunks = std.ArrayList([]const u8).empty };
 
     if (content.len <= CHUNK_SIZE_CHARS) {
         chunks.append(std.heap.page_allocator, content) catch {};

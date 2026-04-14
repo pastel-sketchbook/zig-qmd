@@ -396,16 +396,15 @@ pub const CacheError = error{
 } || db.DbError;
 
 pub fn buildCacheKey(kind: []const u8, model: []const u8, input: []const u8) [64]u8 {
-    var buf = std.ArrayList(u8).initCapacity(std.heap.page_allocator, kind.len + model.len + input.len + 2) catch unreachable;
-    defer buf.deinit(std.heap.page_allocator);
-    buf.appendSlice(std.heap.page_allocator, kind) catch unreachable;
-    buf.append(std.heap.page_allocator, '|') catch unreachable;
-    buf.appendSlice(std.heap.page_allocator, model) catch unreachable;
-    buf.append(std.heap.page_allocator, '|') catch unreachable;
-    buf.appendSlice(std.heap.page_allocator, input) catch unreachable;
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update(kind);
+    hasher.update("|");
+    hasher.update(model);
+    hasher.update("|");
+    hasher.update(input);
 
     var digest: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(buf.items, &digest, .{});
+    hasher.final(&digest);
 
     var out: [64]u8 = undefined;
     for (digest, 0..) |byte, i| {

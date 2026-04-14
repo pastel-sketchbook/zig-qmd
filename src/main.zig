@@ -27,7 +27,10 @@ fn parseOutputFlag(arg: []const u8) ?OutputFormat {
 }
 
 fn parseDocRef(input: []const u8) ?DocRef {
-    const raw = if (std.mem.startsWith(u8, input, "qmd://")) input[6..] else input;
+    const raw = if (std.mem.startsWith(u8, input, "zmd://"))
+        input[6..]
+    else
+        input;
     const slash = std.mem.indexOfScalar(u8, raw, '/') orelse return null;
     if (slash == 0 or slash + 1 >= raw.len) return null;
     return .{ .collection = raw[0..slash], .path = raw[slash + 1 ..] };
@@ -322,11 +325,15 @@ pub fn main() !void {
                     defer chunk_slices.deinit(allocator);
 
                     if (std.mem.eql(u8, qmd.ast.detectLanguage(entry.path), "markdown")) {
-                        var ast_chunker = qmd.ast.AstChunker.init(allocator, "markdown");
-                        defer ast_chunker.deinit();
-                        var ast_chunks = ast_chunker.chunk(content, 1200) catch std.ArrayList([]const u8).initCapacity(allocator, 0) catch unreachable;
-                        defer ast_chunks.deinit(allocator);
-                        try chunk_slices.appendSlice(allocator, ast_chunks.items);
+                        if (qmd.ast.AstChunker.init(allocator, "markdown")) |chunker| {
+                            var ast_chunker = chunker;
+                            defer ast_chunker.deinit();
+                            if (ast_chunker.chunk(content, 1200)) |chunks| {
+                                var ast_chunks = chunks;
+                                defer ast_chunks.deinit(allocator);
+                                try chunk_slices.appendSlice(allocator, ast_chunks.items);
+                            } else |_| {}
+                        } else |_| {}
                     }
 
                     if (chunk_slices.items.len == 0) {
@@ -435,7 +442,7 @@ pub fn main() !void {
                 try stdout.writeAll("[\n");
                 for (result.results.items, 0..) |r, i| {
                     if (i > 0) try stdout.writeAll(",\n");
-                    const vpath = try std.fmt.allocPrint(allocator, "qmd://{s}/{s}", .{ r.collection, r.path });
+                    const vpath = try std.fmt.allocPrint(allocator, "zmd://{s}/{s}", .{ r.collection, r.path });
                     try stdout.writeAll("  {\"id\":");
                     try stdout.print("{d}", .{r.id});
                     try stdout.writeAll(",\"collection\":");
@@ -456,7 +463,7 @@ pub fn main() !void {
             .csv => {
                 try stdout.writeAll("id,collection,path,virtual_path,title,score\n");
                 for (result.results.items) |r| {
-                    const vpath = try std.fmt.allocPrint(allocator, "qmd://{s}/{s}", .{ r.collection, r.path });
+                    const vpath = try std.fmt.allocPrint(allocator, "zmd://{s}/{s}", .{ r.collection, r.path });
                     try stdout.print("{d},", .{r.id});
                     try writeCsvField(stdout, r.collection);
                     try stdout.writeAll(",");
@@ -472,7 +479,7 @@ pub fn main() !void {
             .md => {
                 try stdout.writeAll("| rank | score | collection | path | title |\n|---:|---:|---|---|---|\n");
                 for (result.results.items, 0..) |r, i| {
-                    try stdout.print("| {d} | {d:.4} | {s} | qmd://{s}/{s} | {s} |\n", .{ i + 1, r.score, r.collection, r.collection, r.path, r.title });
+                    try stdout.print("| {d} | {d:.4} | {s} | zmd://{s}/{s} | {s} |\n", .{ i + 1, r.score, r.collection, r.collection, r.path, r.title });
                 }
             },
         }
@@ -579,7 +586,7 @@ pub fn main() !void {
                     }
                     const snippet = try extractSnippet(allocator, query_text, doc.doc);
                     defer allocator.free(snippet);
-                    try stdout.print("| {d} | {d:.4} | qmd://{s}/{s} | {s} | {s} |\n", .{ i + 1, r.score, r.collection, r.path, r.title, snippet });
+                    try stdout.print("| {d} | {d:.4} | zmd://{s}/{s} | {s} | {s} |\n", .{ i + 1, r.score, r.collection, r.path, r.title, snippet });
                 }
             },
             else => {
@@ -596,7 +603,7 @@ pub fn main() !void {
                         const snippet = try extractSnippet(allocator, query_text, doc.doc);
                         defer allocator.free(snippet);
                         if (i > 0) try stdout.writeAll("\n");
-                        try stdout.print("{d}. {s} (qmd://{s}/{s}) score={d:.4}\n", .{ i + 1, r.title, r.collection, r.path, r.score });
+                        try stdout.print("{d}. {s} (zmd://{s}/{s}) score={d:.4}\n", .{ i + 1, r.title, r.collection, r.path, r.score });
                         try stdout.print("   {s}\n", .{snippet});
                     }
                 }
@@ -689,7 +696,7 @@ pub fn main() !void {
             .md => {
                 try stdout.writeAll("| rank | score | collection | path | title |\n|---:|---:|---|---|---|\n");
                 for (result.results.items, 0..) |r, i| {
-                    try stdout.print("| {d} | {d:.4} | {s} | qmd://{s}/{s} | {s} |\n", .{ i + 1, r.score, r.collection, r.collection, r.path, r.title });
+                    try stdout.print("| {d} | {d:.4} | {s} | zmd://{s}/{s} | {s} |\n", .{ i + 1, r.score, r.collection, r.collection, r.path, r.title });
                 }
             },
         }
@@ -774,7 +781,7 @@ pub fn main() !void {
             .md => {
                 try stdout.writeAll("| rank | score | collection | path | title |\n|---:|---:|---|---|---|\n");
                 for (result.results, 0..) |r, i| {
-                    try stdout.print("| {d} | {d:.4} | {s} | qmd://{s}/{s} | {s} |\n", .{ i + 1, r.score, r.collection, r.collection, r.path, r.title });
+                    try stdout.print("| {d} | {d:.4} | {s} | zmd://{s}/{s} | {s} |\n", .{ i + 1, r.score, r.collection, r.collection, r.path, r.title });
                 }
             },
         }
@@ -789,7 +796,7 @@ pub fn main() !void {
             return;
         };
         if (std.mem.eql(u8, first_arg, "--help") or std.mem.eql(u8, first_arg, "-h")) {
-            try stdout.writeAll("Usage: zmd get <collection/path|qmd://collection/path>\n");
+            try stdout.writeAll("Usage: zmd get <collection/path|zmd://collection/path>\n");
             try stdout.flush();
             return;
         }
@@ -805,7 +812,7 @@ pub fn main() !void {
         defer db_.close();
 
         const ref = parseDocRef(doc_path) orelse {
-            try stdout.writeAll("Invalid document path. Use collection/path or qmd://collection/path\n");
+            try stdout.writeAll("Invalid document path. Use collection/path or zmd://collection/path\n");
             try stdout.flush();
             return;
         };
@@ -872,7 +879,7 @@ pub fn main() !void {
                         continue;
                     };
                     const doc = qmd.store.findActiveDocument(&db_, ref.collection, ref.path) catch {
-                        try stdout.print("Not found: qmd://{s}/{s}\n", .{ ref.collection, ref.path });
+                        try stdout.print("Not found: zmd://{s}/{s}\n", .{ ref.collection, ref.path });
                         continue;
                     };
                     defer {
@@ -883,7 +890,7 @@ pub fn main() !void {
 
                     if (i > 0) try stdout.writeAll("\n---\n\n");
                     try stdout.print("# {s}\n", .{doc.title});
-                    try stdout.print("Path: qmd://{s}/{s}\n\n", .{ ref.collection, ref.path });
+                    try stdout.print("Path: zmd://{s}/{s}\n\n", .{ ref.collection, ref.path });
                     try stdout.writeAll(doc.doc);
                     try stdout.writeAll("\n");
                 }
@@ -902,7 +909,7 @@ pub fn main() !void {
                     if (!first) try stdout.writeAll(",\n");
                     first = false;
 
-                    const vpath = try std.fmt.allocPrint(allocator, "qmd://{s}/{s}", .{ ref.collection, ref.path });
+                    const vpath = try std.fmt.allocPrint(allocator, "zmd://{s}/{s}", .{ ref.collection, ref.path });
 
                     try stdout.writeAll("  {\"collection\":");
                     try writeJsonString(stdout, ref.collection);
@@ -931,7 +938,7 @@ pub fn main() !void {
                         std.heap.page_allocator.free(doc.hash);
                         std.heap.page_allocator.free(doc.doc);
                     }
-                    const vpath = try std.fmt.allocPrint(allocator, "qmd://{s}/{s}", .{ ref.collection, ref.path });
+                    const vpath = try std.fmt.allocPrint(allocator, "zmd://{s}/{s}", .{ ref.collection, ref.path });
 
                     try writeCsvField(stdout, ref.collection);
                     try stdout.writeAll(",");
@@ -959,7 +966,7 @@ pub fn main() !void {
                     }
                     if (i > 0) try stdout.writeAll("\n\n---\n\n");
                     try stdout.print("## {s}\n\n", .{doc.title});
-                    try stdout.print("- path: `qmd://{s}/{s}`\n\n", .{ ref.collection, ref.path });
+                    try stdout.print("- path: `zmd://{s}/{s}`\n\n", .{ ref.collection, ref.path });
                     try stdout.writeAll(doc.doc);
                     try stdout.writeAll("\n");
                 }
@@ -1040,7 +1047,7 @@ pub fn main() !void {
             }
 
             for (result.paths.items, result.titles.items) |path, title| {
-                try stdout.print("  qmd://{s}/{s}: {s}\n", .{ c, path, title });
+                try stdout.print("  zmd://{s}/{s}: {s}\n", .{ c, path, title });
             }
         } else {
             var result = qmd.config.listCollections(&db_) catch {
@@ -1060,7 +1067,7 @@ pub fn main() !void {
                     docs.titles.deinit(std.heap.page_allocator);
                 }
                 for (docs.paths.items, docs.titles.items) |path, title| {
-                    try stdout.print("  qmd://{s}/{s}: {s}\n", .{ c_.name, path, title });
+                    try stdout.print("  zmd://{s}/{s}: {s}\n", .{ c_.name, path, title });
                 }
             }
         }
@@ -1133,7 +1140,7 @@ test "parseOutputFlag parses known flags" {
 }
 
 test "parseDocRef parses virtual and plain paths" {
-    const a = parseDocRef("qmd://notes/a.md") orelse return error.TestExpectedEqual;
+    const a = parseDocRef("zmd://notes/a.md") orelse return error.TestExpectedEqual;
     try std.testing.expectEqualStrings("notes", a.collection);
     try std.testing.expectEqualStrings("a.md", a.path);
 

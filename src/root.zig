@@ -57,11 +57,15 @@ pub const Qmd = struct {
                 defer chunk_slices.deinit(self.allocator);
 
                 if (std.mem.eql(u8, ast.detectLanguage(entry.path), "markdown")) {
-                    var ast_chunker = ast.AstChunker.init(self.allocator, "markdown");
-                    defer ast_chunker.deinit();
-                    var ast_chunks = ast_chunker.chunk(content, 1200) catch std.ArrayList([]const u8).initCapacity(self.allocator, 0) catch unreachable;
-                    defer ast_chunks.deinit(self.allocator);
-                    try chunk_slices.appendSlice(self.allocator, ast_chunks.items);
+                    if (ast.AstChunker.init(self.allocator, "markdown")) |chunker_value| {
+                        var ast_chunker = chunker_value;
+                        defer ast_chunker.deinit();
+                        if (ast_chunker.chunk(content, 1200)) |chunks| {
+                            var ast_chunks = chunks;
+                            defer ast_chunks.deinit(self.allocator);
+                            try chunk_slices.appendSlice(self.allocator, ast_chunks.items);
+                        } else |_| {}
+                    } else |_| {}
                 }
 
                 if (chunk_slices.items.len == 0) {
@@ -100,7 +104,10 @@ pub const Qmd = struct {
 };
 
 pub fn parse_virtual_path(input: []const u8) ?struct { collection: []const u8, path: []const u8 } {
-    const raw = if (std.mem.startsWith(u8, input, "qmd://")) input[6..] else input;
+    const raw = if (std.mem.startsWith(u8, input, "zmd://"))
+        input[6..]
+    else
+        input;
     const slash = std.mem.indexOfScalar(u8, raw, '/') orelse return null;
     if (slash == 0 or slash + 1 >= raw.len) return null;
     return .{ .collection = raw[0..slash], .path = raw[slash + 1 ..] };
@@ -119,8 +126,8 @@ test "version is semantic" {
     try std.testing.expect(dots == 2);
 }
 
-test "parse_virtual_path handles qmd prefix" {
-    const parsed = parse_virtual_path("qmd://notes/a.md") orelse return error.TestExpectedEqual;
+test "parse_virtual_path handles zmd prefix" {
+    const parsed = parse_virtual_path("zmd://notes/a.md") orelse return error.TestExpectedEqual;
     try std.testing.expectEqualStrings("notes", parsed.collection);
     try std.testing.expectEqualStrings("a.md", parsed.path);
 }
