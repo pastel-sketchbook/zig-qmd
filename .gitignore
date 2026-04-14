@@ -6,3 +6,4 @@ zig-out/
 *.so
 *.dll
 /PORT_PLAN.md
+/.qmd
