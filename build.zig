@@ -65,7 +65,7 @@ pub fn build(b: *std.Build) void {
         // ggml sources
         llama.addIncludePath(b.path("deps/llama.cpp/ggml/src"));
         llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/ggml/src/ggml.c"), .flags = &.{} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/ggml/src/ggml-backend.c"), .flags = &.{} });
+        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/ggml/src/ggml-backend.cpp"), .flags = &.{} });
         llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/ggml/src/ggml-alloc.c"), .flags = &.{} });
         llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/ggml/src/ggml-backend-backend.c"), .flags = &.{} });
         llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/ggml/src/ggml-quants.c"), .flags = &.{} });
@@ -82,18 +82,6 @@ pub fn build(b: *std.Build) void {
         llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/ggml/src/ggml-cortex-inferencegemm.c"), .flags = &.{} });
         llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/ggml/src/ggml-f16.c"), .flags = &.{} });
         llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/ggml/src/ggml-impl.c"), .flags = &.{} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/ggml/src/ggml-metal.m"), .flags = &.{} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/ggml/src/ggml-opencl.c"), .flags = &.{} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/ggml/src/ggml-vulkan.c"), .flags = &.{} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/ggml/src/ggml-sycl.cpp"), .flags = &.{} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/ggml/src/ggml-cuda.c"), .flags = &.{} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/ggml/src/ggml-blas.c"), .flags = &.{} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/ggml/src/ggml-blas-thread.c"), .flags = &.{} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/gguf/gguf.c"), .flags = &.{} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/gguf/gguf-op-validate.c"), .flags = &.{} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/gguf/gguf-op.c"), .flags = &.{} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/gguf/gguf-swap.c"), .flags = &.{} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/ggml/src/ggml-metal.h"), .flags = &.{} });
         if (target.result.os.tag == .macos) {
             llama.linkFramework("Metal");
             llama.linkFramework("MetalKit");

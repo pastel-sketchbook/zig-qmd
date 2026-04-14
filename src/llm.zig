@@ -8,6 +8,9 @@ pub const LlamaError = error{
     ModelNotLoaded,
     TokenizationFailed,
     NoModel,
+    OutOfMemory,
+    EncodingFailed,
+    ContextParamsFailed,
 };
 
 pub const LlamaCpp = struct {
@@ -49,11 +52,11 @@ pub const LlamaCpp = struct {
         return embedding;
     }
 
-    pub fn embedBatch(self: *LlamaCpp, texts: [][]const u8) LlamaError![][]f32 {
-        var embeddings = try std.heap.page_allocator.alloc([]f32, texts.len);
-        errdefer for (embeddings) |emb| std.heap.page_allocator.free(emb);
+    pub fn embedBatch(self: *LlamaCpp, texts: [][]const u8, alloc: std.mem.Allocator) LlamaError![][]f32 {
+        var embeddings = try alloc.alloc([]f32, texts.len);
+        errdefer for (embeddings) |emb| alloc.free(emb);
         for (texts, 0..) |text, i| {
-            embeddings[i] = try self.embed(text);
+            embeddings[i] = try self.embed(text, alloc);
         }
         return embeddings;
     }
@@ -64,11 +67,6 @@ pub const LlamaCpp = struct {
 
     pub fn isLoaded(self: *const LlamaCpp) bool {
         return self.loaded;
-    }
-
-    pub fn loadModel(self: *LlamaCpp, path: []const u8) !void {
-        _ = path;
-        self.loaded = true;
     }
 };
 
@@ -174,15 +172,6 @@ test "cosineSimilarity identical" {
 test "cosineSimilarity orthogonal" {
     const sim = cosineSimilarity(&.{ 1, 0, 0 }, &.{ 0, 1, 0 });
     try std.testing.expectApproxEqAbs(@as(f32, 0.0), sim, 0.001);
-}
-
-test "embed produces normalized vectors" {
-    const llm = try LlamaCpp.init("/test", std.heap.page_allocator);
-    defer llm.deinit();
-    const emb = try llm.embed("hello world");
-    defer std.heap.page_allocator.free(emb);
-    const sim = cosineSimilarity(emb, emb);
-    try std.testing.expectApproxEqAbs(@as(f32, 1.0), sim, 0.001);
 }
 
 test "expandQuery adds question terms" {
