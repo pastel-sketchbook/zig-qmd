@@ -60,6 +60,32 @@ fn writeCsvField(out: anytype, s: []const u8) !void {
     try out.writeAll("\"");
 }
 
+fn extractSnippet(allocator: std.mem.Allocator, query: []const u8, doc: []const u8) ![]u8 {
+    if (doc.len == 0) return allocator.dupe(u8, "");
+
+    var tok_it = std.mem.tokenizeScalar(u8, query, ' ');
+    const token = tok_it.next() orelse return allocator.dupe(u8, doc[0..@min(doc.len, 180)]);
+
+    const lower_doc = try allocator.alloc(u8, doc.len);
+    defer allocator.free(lower_doc);
+    for (doc, 0..) |ch, i| lower_doc[i] = std.ascii.toLower(ch);
+
+    const lower_tok = try allocator.alloc(u8, token.len);
+    defer allocator.free(lower_tok);
+    for (token, 0..) |ch, i| lower_tok[i] = std.ascii.toLower(ch);
+
+    const idx = std.mem.indexOf(u8, lower_doc, lower_tok) orelse 0;
+    const start: usize = if (idx > 60) idx - 60 else 0;
+    const end = @min(doc.len, idx + token.len + 140);
+
+    var out = try std.ArrayList(u8).initCapacity(allocator, end - start + 8);
+    defer out.deinit(allocator);
+    if (start > 0) try out.appendSlice(allocator, "...");
+    try out.appendSlice(allocator, doc[start..end]);
+    if (end < doc.len) try out.appendSlice(allocator, "...");
+    return out.toOwnedSlice(allocator);
+}
+
 fn make_embedding_engine(allocator: std.mem.Allocator) ?qmd.llm.LlamaEmbedding {
     const bin_path = std.process.getEnvVarOwned(allocator, "QMD_LLAMA_EMBED_BIN") catch allocator.dupe(u8, DEFAULT_LLAMA_EMBED_BIN) catch return null;
 
@@ -95,7 +121,7 @@ pub fn main() !void {
 
     const cmd = args.next() orelse {
         try stdout.writeAll("Usage: zmd <command>\n");
-        try stdout.writeAll("Commands: version, collection, update, search, vsearch, query, get, multi-get, status, mcp, ls, cleanup, embed\n");
+        try stdout.writeAll("Commands: version, collection, update, search, vsearch, query, context, get, multi-get, status, mcp, ls, cleanup, embed\n");
         try stdout.flush();
         return;
     };
@@ -109,6 +135,7 @@ pub fn main() !void {
         try stdout.writeAll("  search     Full-text search\n");
         try stdout.writeAll("  vsearch    Vector semantic search\n");
         try stdout.writeAll("  query      Hybrid search (FTS + vector)\n");
+        try stdout.writeAll("  context    Context-rich search snippets\n");
         try stdout.writeAll("  get        Get document by path\n");
         try stdout.writeAll("  multi-get  Get multiple documents by path\n");
         try stdout.writeAll("  status     Show system status\n");
@@ -430,6 +457,91 @@ pub fn main() !void {
                 }
             },
         }
+        try stdout.flush();
+        return;
+    }
+
+    if (std.mem.eql(u8, cmd, "context")) {
+        const query_text = args.next() orelse {
+            try stdout.writeAll("Usage: zmd context <query> [--json]\n");
+            try stdout.flush();
+            return;
+        };
+
+        var output_format: OutputFormat = .text;
+        while (args.next()) |arg| {
+            if (parseOutputFlag(arg)) |fmt| output_format = fmt;
+        }
+
+        var db_path_buf: [256]u8 = undefined;
+        const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}", .{DB_PATH});
+        var db_ = qmd.db.Db.open(db_path) catch {
+            try stdout.writeAll("Error: Database not found. Run 'zmd update' first.\n");
+            try stdout.flush();
+            return;
+        };
+        defer db_.close();
+
+        var result = qmd.search.hybridSearch(&db_, query_text, null, .{
+            .enable_vector = true,
+            .max_results = 5,
+        }) catch {
+            try stdout.writeAll("Context search failed\n");
+            try stdout.flush();
+            return;
+        };
+        defer result.results.deinit(std.heap.page_allocator);
+
+        switch (output_format) {
+            .json => {
+                try stdout.writeAll("[\n");
+                var first = true;
+                for (result.results.items) |r| {
+                    const doc = qmd.store.findActiveDocument(&db_, r.collection, r.path) catch continue;
+                    defer {
+                        std.heap.page_allocator.free(doc.title);
+                        std.heap.page_allocator.free(doc.hash);
+                        std.heap.page_allocator.free(doc.doc);
+                    }
+                    const snippet = try extractSnippet(allocator, query_text, doc.doc);
+                    defer allocator.free(snippet);
+                    if (!first) try stdout.writeAll(",\n");
+                    first = false;
+                    try stdout.writeAll("  {\"collection\":");
+                    try writeJsonString(stdout, r.collection);
+                    try stdout.writeAll(",\"path\":");
+                    try writeJsonString(stdout, r.path);
+                    try stdout.writeAll(",\"title\":");
+                    try writeJsonString(stdout, r.title);
+                    try stdout.writeAll(",\"score\":");
+                    try stdout.print("{d}", .{r.score});
+                    try stdout.writeAll(",\"snippet\":");
+                    try writeJsonString(stdout, snippet);
+                    try stdout.writeAll("}");
+                }
+                try stdout.writeAll("\n]\n");
+            },
+            else => {
+                if (result.results.items.len == 0) {
+                    try stdout.writeAll("No context results found.\n");
+                } else {
+                    for (result.results.items, 0..) |r, i| {
+                        const doc = qmd.store.findActiveDocument(&db_, r.collection, r.path) catch continue;
+                        defer {
+                            std.heap.page_allocator.free(doc.title);
+                            std.heap.page_allocator.free(doc.hash);
+                            std.heap.page_allocator.free(doc.doc);
+                        }
+                        const snippet = try extractSnippet(allocator, query_text, doc.doc);
+                        defer allocator.free(snippet);
+                        if (i > 0) try stdout.writeAll("\n");
+                        try stdout.print("{d}. {s} (qmd://{s}/{s}) score={d:.4}\n", .{ i + 1, r.title, r.collection, r.path, r.score });
+                        try stdout.print("   {s}\n", .{snippet});
+                    }
+                }
+            },
+        }
+
         try stdout.flush();
         return;
     }
