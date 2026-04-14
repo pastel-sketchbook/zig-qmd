@@ -1,6 +1,7 @@
 const std = @import("std");
 const db = @import("db.zig");
 const store = @import("store.zig");
+const llm = @import("llm.zig");
 
 pub const SearchError = error{
     QueryFailed,
@@ -231,31 +232,121 @@ pub fn searchVec(
     query: []const u8,
     collection: ?[]const u8,
 ) !struct { results: []ScoredResult } {
-    _ = query;
+    const query_embedding = try embed_query(query);
+    defer std.heap.page_allocator.free(query_embedding);
 
     var results = try std.ArrayList(ScoredResult).initCapacity(std.heap.page_allocator, 0);
     errdefer results.deinit(std.heap.page_allocator);
 
-    var stmt = db_.prepare("SELECT hash, collection, path, title FROM documents WHERE active = 1") catch return .{ .results = &.{} };
+    var stmt = db_.prepare(
+        "SELECT d.id, d.hash, d.collection, d.path, d.title, cv.embedding FROM documents d LEFT JOIN content_vectors cv ON cv.hash = d.hash AND cv.seq = 0 AND cv.pos = 0 WHERE d.active = 1",
+    ) catch return .{ .results = &.{} };
     defer stmt.finalize();
 
     while (stmt.step() catch false) {
-        const hsh = stmt.columnText(0);
-        const coll = stmt.columnText(1);
-        const pth = stmt.columnText(2);
-        const ttl = stmt.columnText(3);
+        const id = stmt.columnInt(0);
+        const hsh = stmt.columnText(1);
+        const coll = stmt.columnText(2);
+        const pth = stmt.columnText(3);
+        const ttl = stmt.columnText(4);
+        const emb = stmt.columnText(5);
 
         const hash = if (hsh) |h| try std.heap.page_allocator.dupe(u8, std.mem.span(h)) else try std.heap.page_allocator.dupe(u8, "");
         const col = if (coll) |c| try std.heap.page_allocator.dupe(u8, std.mem.span(c)) else try std.heap.page_allocator.dupe(u8, "");
         const path = if (pth) |p| try std.heap.page_allocator.dupe(u8, std.mem.span(p)) else try std.heap.page_allocator.dupe(u8, "");
         const title = if (ttl) |t| try std.heap.page_allocator.dupe(u8, std.mem.span(t)) else try std.heap.page_allocator.dupe(u8, "");
 
-        if (collection == null or std.mem.eql(u8, col, collection.?[0..collection.?.len])) {
-            try results.append(std.heap.page_allocator, .{ .id = 0, .collection = col, .path = path, .title = title, .hash = hash, .score = 0.5 });
+        if (collection != null and !std.mem.eql(u8, col, collection.?)) {
+            continue;
         }
+
+        if (emb == null) continue;
+
+        const doc_embedding = parse_embedding_json_array(std.mem.span(emb.?)) catch continue;
+        defer std.heap.page_allocator.free(doc_embedding);
+
+        const score = llm.cosineSimilarity(query_embedding, doc_embedding);
+        try results.append(std.heap.page_allocator, .{
+            .id = id,
+            .collection = col,
+            .path = path,
+            .title = title,
+            .hash = hash,
+            .score = score,
+        });
     }
 
+    std.sort.heap(ScoredResult, results.items, {}, struct {
+        fn less(_: void, a: ScoredResult, b: ScoredResult) bool {
+            return a.score > b.score;
+        }
+    }.less);
+
     return .{ .results = results.items };
+}
+
+fn embed_query(query: []const u8) ![]f32 {
+    const allocator = std.heap.page_allocator;
+
+    const bin_path = std.process.getEnvVarOwned(allocator, "QMD_LLAMA_EMBED_BIN") catch null;
+    defer if (bin_path) |p| allocator.free(p);
+
+    const model_path = std.process.getEnvVarOwned(allocator, "QMD_LLAMA_MODEL") catch null;
+    defer if (model_path) |p| allocator.free(p);
+
+    if (bin_path != null and model_path != null) {
+        var engine = llm.LlamaEmbedding.init(allocator, bin_path.?, model_path.?) catch {
+            var fallback = try llm.LlamaCpp.init("/nonexistent", allocator);
+            defer fallback.deinit();
+            return fallback.embed(query, allocator);
+        };
+        defer engine.deinit();
+        return engine.embed(query) catch {
+            var fallback = try llm.LlamaCpp.init("/nonexistent", allocator);
+            defer fallback.deinit();
+            return fallback.embed(query, allocator);
+        };
+    }
+
+    var fallback = try llm.LlamaCpp.init("/nonexistent", allocator);
+    defer fallback.deinit();
+    return fallback.embed(query, allocator);
+}
+
+fn parse_embedding_json_array(json: []const u8) ![]f32 {
+    const allocator = std.heap.page_allocator;
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, json, .{}) catch return error.InvalidJson;
+    defer parsed.deinit();
+
+    if (parsed.value != .array) return error.InvalidJson;
+    const items = parsed.value.array.items;
+    var out = try allocator.alloc(f32, items.len);
+    for (items, 0..) |v, i| {
+        out[i] = switch (v) {
+            .float => @floatCast(v.float),
+            .integer => @floatFromInt(v.integer),
+            else => return error.InvalidJson,
+        };
+    }
+    return out;
+}
+
+test "embed_query uses real model when env is set" {
+    const allocator = std.testing.allocator;
+    const maybe_model = std.process.getEnvVarOwned(allocator, "QMD_REAL_GGUF_MODEL");
+    if (maybe_model) |model| {
+        defer allocator.free(model);
+        const bin = "deps/llama.cpp/build/bin/llama-embedding";
+        // These APIs are best-effort in tests; if unavailable, this test can still compile/run locally.
+        std.posix.setenv("QMD_LLAMA_EMBED_BIN", bin, true) catch return;
+        std.posix.setenv("QMD_LLAMA_MODEL", model, true) catch return;
+
+        const emb = try embed_query("oauth sign in token");
+        defer std.heap.page_allocator.free(emb);
+        try std.testing.expect(emb.len > 300);
+    } else |_| {
+        // Skip when no real model is configured.
+    }
 }
 
 test "reciprocalRankFusion merges results" {
@@ -286,6 +377,33 @@ test "hybridSearch with FTS only" {
     defer result.results.deinit(std.heap.page_allocator);
 
     try std.testing.expect(result.fts_count > 0);
+}
+
+test "searchVec uses stored vectors and ranks by cosine" {
+    var db_ = try db.Db.open(":memory:");
+    defer db_.close();
+    try db.initSchema(&db_);
+
+    try store.insertDocument(&db_, "test", "a.md", "# Auth\nLogin and auth flow");
+    try store.insertDocument(&db_, "test", "b.md", "# Cooking\nRecipe and food");
+
+    const doc_a = try store.findActiveDocument(&db_, "test", "a.md");
+    const doc_b = try store.findActiveDocument(&db_, "test", "b.md");
+
+    // Match the current fallback embedding model for deterministic test behavior.
+    var fallback = try llm.LlamaCpp.init("/nonexistent", std.heap.page_allocator);
+    defer fallback.deinit();
+    const q_emb = try fallback.embed("auth", std.heap.page_allocator);
+    defer std.heap.page_allocator.free(q_emb);
+    const b_emb = try fallback.embed("totally unrelated baseline", std.heap.page_allocator);
+    defer std.heap.page_allocator.free(b_emb);
+
+    try store.upsertContentVector(&db_, doc_a.hash, "test", q_emb, std.heap.page_allocator);
+    try store.upsertContentVector(&db_, doc_b.hash, "test", b_emb, std.heap.page_allocator);
+
+    const result = try searchVec(&db_, "auth", null);
+    try std.testing.expect(result.results.len >= 2);
+    try std.testing.expect(result.results[0].score >= result.results[1].score);
 }
 
 test "buildFTS5Query parses simple tokens" {

@@ -4,6 +4,30 @@ const qmd = @import("qmd");
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 
 const DB_PATH = ".qmd/data.db";
+const DEFAULT_LLAMA_EMBED_BIN = "deps/llama.cpp/build/bin/llama-embedding";
+const DEFAULT_LLAMA_MODEL_PATH = "";
+
+fn make_embedding_engine(allocator: std.mem.Allocator) ?qmd.llm.LlamaEmbedding {
+    const bin_path = std.process.getEnvVarOwned(allocator, "QMD_LLAMA_EMBED_BIN") catch allocator.dupe(u8, DEFAULT_LLAMA_EMBED_BIN) catch return null;
+
+    const model_path = std.process.getEnvVarOwned(allocator, "QMD_LLAMA_MODEL") catch allocator.dupe(u8, DEFAULT_LLAMA_MODEL_PATH) catch {
+        allocator.free(bin_path);
+        return null;
+    };
+
+    if (model_path.len == 0) {
+        allocator.free(bin_path);
+        allocator.free(model_path);
+        return null;
+    }
+
+    defer {
+        allocator.free(bin_path);
+        allocator.free(model_path);
+    }
+
+    return qmd.llm.LlamaEmbedding.init(allocator, bin_path, model_path) catch null;
+}
 
 pub fn main() !void {
     defer _ = gpa.deinit();
@@ -203,6 +227,35 @@ pub fn main() !void {
                         try stdout.print("    Error inserting {s}: {any}\n", .{ entry.path, err });
                         continue;
                     };
+
+                    const doc_hash = qmd.store.findActiveDocumentHash(&db_, col.name, entry.path) catch {
+                        total_indexed += 1;
+                        continue;
+                    };
+
+                    if (make_embedding_engine(allocator)) |engine_instance| {
+                        var engine = engine_instance;
+                        defer engine.deinit();
+                        const emb = engine.embed(content) catch {
+                            total_indexed += 1;
+                            continue;
+                        };
+                        defer allocator.free(emb);
+                        qmd.store.upsertContentVector(&db_, doc_hash[0..], engine.model_path, emb, allocator) catch {};
+                    } else {
+                        // fallback deterministic embedding for now
+                        var fallback = qmd.llm.LlamaCpp.init("/nonexistent", allocator) catch {
+                            total_indexed += 1;
+                            continue;
+                        };
+                        defer fallback.deinit();
+                        const emb = fallback.embed(content, allocator) catch {
+                            total_indexed += 1;
+                            continue;
+                        };
+                        defer allocator.free(emb);
+                        qmd.store.upsertContentVector(&db_, doc_hash[0..], "fallback-fnv", emb, allocator) catch {};
+                    }
                     total_indexed += 1;
                 }
             }
@@ -231,7 +284,7 @@ pub fn main() !void {
         defer db_.close();
 
         var result = qmd.search.hybridSearch(&db_, query_text, null, .{
-            .enable_vector = false,
+            .enable_vector = true,
             .rrf_k = qmd.search.RRF_K,
             .max_results = 10,
         }) catch {

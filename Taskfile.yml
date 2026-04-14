@@ -71,6 +71,13 @@ tasks:
         echo ""
         echo "E2E test complete!"
 
+  e2e:real:
+    desc: Run end-to-end test using real llama.cpp embedding model (hf://)
+    deps:
+      - build
+    cmds:
+      - ./scripts/e2e-real.sh
+
   install:
     desc: Build and copy zmd to ~/bin/
     deps:

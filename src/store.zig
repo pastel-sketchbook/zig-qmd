@@ -58,7 +58,7 @@ pub fn insertContent(db_: *db.Db, content: []const u8) StoreError![SHA256_HEX_LE
     const sql = "INSERT OR IGNORE INTO content (hash, doc, created_at) VALUES (?, ?, ?)";
     var stmt = try db_.prepare(sql);
     defer stmt.finalize();
-    try stmt.bindText(1, hash[0..]);
+    try stmt.bindText(1, hash[0..SHA256_HEX_LEN]);
     try stmt.bindText(2, content);
     try stmt.bindText(3, now);
     _ = try stmt.step();
@@ -85,6 +85,23 @@ pub fn findActiveDocument(db_: *db.Db, collection: []const u8, path: []const u8)
         .hash = if (hsh) |h| std.mem.span(h) else "",
         .doc = if (d) |doc| std.mem.span(doc) else "",
     };
+}
+
+pub fn findActiveDocumentHash(db_: *db.Db, collection: []const u8, path: []const u8) StoreError![SHA256_HEX_LEN]u8 {
+    const sql = "SELECT d.hash FROM documents d WHERE d.collection = ? AND d.path = ? AND d.active = 1";
+    var stmt = try db_.prepare(sql);
+    defer stmt.finalize();
+    try stmt.bindText(1, collection);
+    try stmt.bindText(2, path);
+
+    if (!try stmt.step()) return StoreError.NotFound;
+    const hsh = stmt.columnText(0) orelse return StoreError.NotFound;
+    const span = std.mem.span(hsh);
+    if (span.len < SHA256_HEX_LEN) return StoreError.NotFound;
+
+    var out: [SHA256_HEX_LEN]u8 = undefined;
+    std.mem.copyForwards(u8, out[0..], span[0..SHA256_HEX_LEN]);
+    return out;
 }
 
 pub fn getActiveDocumentPaths(db_: *db.Db, collection: []const u8) StoreError!struct { paths: std.ArrayList([]const u8), titles: std.ArrayList([]const u8) } {
@@ -131,9 +148,39 @@ pub fn insertDocument(db_: *db.Db, collection: []const u8, path: []const u8, con
     try stmt.bindText(1, collection);
     try stmt.bindText(2, path);
     try stmt.bindText(3, title);
-    try stmt.bindText(4, hash[0..]);
+    try stmt.bindText(4, hash[0..SHA256_HEX_LEN]);
     try stmt.bindText(5, now);
     try stmt.bindText(6, now);
+    _ = try stmt.step();
+}
+
+pub fn upsertContentVector(
+    db_: *db.Db,
+    hash: []const u8,
+    model: []const u8,
+    embedding: []const f32,
+    allocator: std.mem.Allocator,
+) StoreError!void {
+    var emb_json = try std.ArrayList(u8).initCapacity(allocator, embedding.len * 10 + 2);
+    defer emb_json.deinit(allocator);
+
+    try emb_json.append(allocator, '[');
+    for (embedding, 0..) |v, i| {
+        if (i > 0) try emb_json.append(allocator, ',');
+        try emb_json.writer(allocator).print("{d}", .{v});
+    }
+    try emb_json.append(allocator, ']');
+
+    const now = "2024-01-01T00:00:00Z";
+    var stmt = try db_.prepare(
+        "INSERT OR REPLACE INTO content_vectors (hash, seq, pos, model, embedding, embedded_at) VALUES (?, 0, 0, ?, ?, ?)",
+    );
+    defer stmt.finalize();
+
+    try stmt.bindText(1, hash);
+    try stmt.bindText(2, model);
+    try stmt.bindText(3, emb_json.items);
+    try stmt.bindText(4, now);
     _ = try stmt.step();
 }
 
@@ -203,6 +250,16 @@ test "deactivateDocument marks inactive" {
     try std.testing.expectError(StoreError.NotFound, result);
 }
 
+test "findActiveDocumentHash returns stable 64-byte hash" {
+    var db_ = try db.Db.open(":memory:");
+    defer db_.close();
+    try db.initSchema(&db_);
+
+    try insertDocument(&db_, "notes", "x.md", "# X\n\ncontent");
+    const hash = try findActiveDocumentHash(&db_, "notes", "x.md");
+    try std.testing.expectEqual(@as(usize, 64), hash.len);
+}
+
 test "getActiveDocumentPaths returns all paths" {
     var db_ = try db.Db.open(":memory:");
     defer db_.close();
@@ -217,4 +274,25 @@ test "getActiveDocumentPaths returns all paths" {
         result.titles.deinit();
     }
     try std.testing.expectEqual(@as(usize, 2), result.paths.items.len);
+}
+
+test "upsertContentVector stores embedding JSON" {
+    var db_ = try db.Db.open(":memory:");
+    defer db_.close();
+    try db.initSchema(&db_);
+
+    try insertDocument(&db_, "notes", "a.md", "# A\n\ncontent");
+    const doc = try findActiveDocument(&db_, "notes", "a.md");
+
+    try upsertContentVector(&db_, doc.hash, "test-model", &.{ 0.1, 0.2, -0.3 }, std.testing.allocator);
+
+    var stmt = try db_.prepare("SELECT model, embedding FROM content_vectors WHERE hash = ? AND seq = 0 AND pos = 0");
+    defer stmt.finalize();
+    try stmt.bindText(1, doc.hash);
+    try std.testing.expect(try stmt.step());
+
+    const model = stmt.columnText(0).?;
+    const embedding = stmt.columnText(1).?;
+    try std.testing.expectEqualStrings("test-model", std.mem.span(model));
+    try std.testing.expect(std.mem.indexOf(u8, std.mem.span(embedding), "0.1") != null);
 }

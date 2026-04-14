@@ -203,3 +203,315 @@ test "LlmCache stores and retrieves" {
     try cache.put("key", .{ .response = "val", .created_at = 1 });
     try std.testing.expect(cache.get("key") != null);
 }
+
+// =============================================================================
+// LlamaEmbedding - Subprocess-based embedding engine
+// =============================================================================
+
+pub const EmbeddingError = error{
+    BinaryNotFound,
+    ModelNotFound,
+    SpawnFailed,
+    ProcessFailed,
+    ParseError,
+    InvalidJson,
+    OutOfMemory,
+    Timeout,
+};
+
+/// Subprocess-based embedding engine using llama-embedding binary
+pub const LlamaEmbedding = struct {
+    binary_path: []u8,
+    model_path: []u8,
+    embedding_dim: usize,
+    normalize: i8 = 2, // L2 normalization by default
+    allocator: std.mem.Allocator,
+
+    const Self = @This();
+
+    /// Initialize the embedding engine with paths to binary and model
+    pub fn init(
+        allocator: std.mem.Allocator,
+        binary_path: []const u8,
+        model_path: []const u8,
+    ) EmbeddingError!Self {
+        // Validate binary path exists (runtime spawn will verify execution)
+        std.fs.cwd().access(binary_path, .{ .mode = .read_only }) catch {
+            return EmbeddingError.BinaryNotFound;
+        };
+
+        // Validate model file exists for local paths.
+        // Remote specifiers like hf://... are resolved by llama.cpp itself.
+        const is_remote = std.mem.startsWith(u8, model_path, "hf://") or
+            std.mem.startsWith(u8, model_path, "https://") or
+            std.mem.startsWith(u8, model_path, "http://");
+        if (!is_remote) {
+            std.fs.cwd().access(model_path, .{ .mode = .read_only }) catch {
+                return EmbeddingError.ModelNotFound;
+            };
+        }
+
+        const bin_copy = allocator.dupe(u8, binary_path) catch return EmbeddingError.OutOfMemory;
+        errdefer allocator.free(bin_copy);
+        const model_copy = allocator.dupe(u8, model_path) catch return EmbeddingError.OutOfMemory;
+
+        return Self{
+            .binary_path = bin_copy,
+            .model_path = model_copy,
+            .embedding_dim = 384, // Default, will be determined from model
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.allocator.free(self.binary_path);
+        self.allocator.free(self.model_path);
+    }
+
+    /// Generate embedding for a single text using llama-embedding subprocess
+    pub fn embed(self: *Self, text: []const u8) EmbeddingError![]f32 {
+        const embeddings = try self.embedBatch(&[_][]const u8{text});
+        defer self.allocator.free(embeddings);
+
+        if (embeddings.len == 0) return EmbeddingError.ParseError;
+
+        // Return the first embedding (caller owns it)
+        const result = embeddings[0];
+        return result;
+    }
+
+    /// Generate embeddings for multiple texts in batch using llama-embedding subprocess
+    pub fn embedBatch(self: *Self, texts: []const []const u8) EmbeddingError![][]f32 {
+        if (texts.len == 0) {
+            return self.allocator.alloc([]f32, 0) catch return EmbeddingError.OutOfMemory;
+        }
+
+        // Build prompt with separator for batch processing
+        // llama-embedding supports multiple prompts with --embd-separator
+        const separator = "<#sep#>";
+        var total_len: usize = 0;
+        for (texts) |t| total_len += t.len + separator.len;
+
+        var prompt = try std.ArrayList(u8).initCapacity(self.allocator, total_len);
+        defer prompt.deinit(self.allocator);
+
+        for (texts, 0..) |t, i| {
+            prompt.appendSlice(self.allocator, t) catch return EmbeddingError.OutOfMemory;
+            if (i < texts.len - 1) {
+                prompt.appendSlice(self.allocator, separator) catch return EmbeddingError.OutOfMemory;
+            }
+        }
+
+        // Format normalize argument
+        var norm_buf: [8]u8 = undefined;
+        const norm_str = std.fmt.bufPrint(&norm_buf, "{d}", .{self.normalize}) catch return EmbeddingError.OutOfMemory;
+
+        var argv = try std.ArrayList([]const u8).initCapacity(self.allocator, 16);
+        defer argv.deinit(self.allocator);
+
+        try argv.append(self.allocator, self.binary_path);
+
+        if (std.mem.startsWith(u8, self.model_path, "hf://")) {
+            try argv.append(self.allocator, "--hf-repo");
+            try argv.append(self.allocator, self.model_path[5..]);
+        } else {
+            try argv.append(self.allocator, "-m");
+            try argv.append(self.allocator, self.model_path);
+        }
+
+        try argv.append(self.allocator, "--embd-output-format");
+        try argv.append(self.allocator, "json");
+        try argv.append(self.allocator, "--embd-normalize");
+        try argv.append(self.allocator, norm_str);
+        try argv.append(self.allocator, "--embd-separator");
+        try argv.append(self.allocator, separator);
+        try argv.append(self.allocator, "-p");
+        try argv.append(self.allocator, prompt.items);
+
+        const run_result = std.process.Child.run(.{
+            .allocator = self.allocator,
+            .argv = argv.items,
+            .max_output_bytes = 10 * 1024 * 1024,
+        }) catch return EmbeddingError.SpawnFailed;
+        defer self.allocator.free(run_result.stdout);
+        defer self.allocator.free(run_result.stderr);
+
+        if (run_result.term != .Exited or run_result.term.Exited != 0) {
+            return EmbeddingError.ProcessFailed;
+        }
+
+        // Parse JSON output
+        return parseEmbeddingJson(self.allocator, run_result.stdout);
+    }
+};
+
+/// Parse OpenAI-style embedding JSON response from llama-embedding
+/// Format: {"object":"list","data":[{"object":"embedding","index":N,"embedding":[...]},...]}
+pub fn parseEmbeddingJson(allocator: std.mem.Allocator, json_str: []const u8) EmbeddingError![][]f32 {
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, json_str, .{}) catch {
+        return EmbeddingError.InvalidJson;
+    };
+    defer parsed.deinit();
+
+    const root = parsed.value;
+
+    // Navigate to data array
+    const data = root.object.get("data") orelse return EmbeddingError.ParseError;
+    if (data != .array) return EmbeddingError.ParseError;
+
+    var result = allocator.alloc([]f32, data.array.items.len) catch {
+        return EmbeddingError.OutOfMemory;
+    };
+    errdefer allocator.free(result);
+
+    for (data.array.items, 0..) |item, i| {
+        if (item != .object) {
+            // Clean up already allocated embeddings
+            for (0..i) |j| allocator.free(result[j]);
+            return EmbeddingError.ParseError;
+        }
+
+        const embedding_val = item.object.get("embedding") orelse {
+            for (0..i) |j| allocator.free(result[j]);
+            return EmbeddingError.ParseError;
+        };
+
+        if (embedding_val != .array) {
+            for (0..i) |j| allocator.free(result[j]);
+            return EmbeddingError.ParseError;
+        }
+
+        const emb_array = embedding_val.array.items;
+        var embedding = allocator.alloc(f32, emb_array.len) catch {
+            for (0..i) |j| allocator.free(result[j]);
+            return EmbeddingError.OutOfMemory;
+        };
+        errdefer allocator.free(embedding);
+
+        for (emb_array, 0..) |val, k| {
+            embedding[k] = switch (val) {
+                .float => @floatCast(val.float),
+                .integer => @floatFromInt(val.integer),
+                else => {
+                    allocator.free(embedding);
+                    for (0..i) |j| allocator.free(result[j]);
+                    return EmbeddingError.ParseError;
+                },
+            };
+        }
+
+        result[i] = embedding;
+    }
+
+    return result;
+}
+
+// =============================================================================
+// LlamaEmbedding Tests
+// =============================================================================
+
+test "LlamaEmbedding.init fails with non-existent binary" {
+    const allocator = std.testing.allocator;
+    const result = LlamaEmbedding.init(
+        allocator,
+        "/nonexistent/llama-embedding",
+        "/some/model.gguf",
+    );
+    try std.testing.expectError(EmbeddingError.BinaryNotFound, result);
+}
+
+test "LlamaEmbedding.init fails with non-existent model" {
+    const allocator = std.testing.allocator;
+    // Use a binary that exists (the test runner itself)
+    const result = LlamaEmbedding.init(
+        allocator,
+        "/bin/sh", // exists on all Unix systems
+        "/nonexistent/model.gguf",
+    );
+    try std.testing.expectError(EmbeddingError.ModelNotFound, result);
+}
+
+test "LlamaEmbedding.init accepts hf remote model spec" {
+    const allocator = std.testing.allocator;
+    var engine = try LlamaEmbedding.init(
+        allocator,
+        "/bin/sh",
+        "hf://ggml-org/embeddinggemma-300M-qat-q4_0-GGUF:Q4_0",
+    );
+    defer engine.deinit();
+    try std.testing.expectEqualStrings("hf://ggml-org/embeddinggemma-300M-qat-q4_0-GGUF:Q4_0", engine.model_path);
+}
+
+test "parseEmbeddingJson parses OpenAI-style JSON" {
+    const allocator = std.testing.allocator;
+
+    // Sample OpenAI-style embedding response
+    const json =
+        \\{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.1,0.2,0.3,-0.4,0.5]}],"model":"test","usage":{"prompt_tokens":5,"total_tokens":5}}
+    ;
+
+    const embeddings = try parseEmbeddingJson(allocator, json);
+    defer {
+        for (embeddings) |emb| allocator.free(emb);
+        allocator.free(embeddings);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), embeddings.len);
+    try std.testing.expectEqual(@as(usize, 5), embeddings[0].len);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.1), embeddings[0][0], 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, -0.4), embeddings[0][3], 0.001);
+}
+
+test "parseEmbeddingJson handles multiple embeddings" {
+    const allocator = std.testing.allocator;
+
+    const json =
+        \\{"object":"list","data":[{"object":"embedding","index":0,"embedding":[1.0,2.0]},{"object":"embedding","index":1,"embedding":[3.0,4.0]}],"model":"test","usage":{"prompt_tokens":10,"total_tokens":10}}
+    ;
+
+    const embeddings = try parseEmbeddingJson(allocator, json);
+    defer {
+        for (embeddings) |emb| allocator.free(emb);
+        allocator.free(embeddings);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), embeddings.len);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), embeddings[0][0], 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 3.0), embeddings[1][0], 0.001);
+}
+
+test "parseEmbeddingJson returns error on invalid JSON" {
+    const allocator = std.testing.allocator;
+    const result = parseEmbeddingJson(allocator, "not valid json");
+    try std.testing.expectError(EmbeddingError.InvalidJson, result);
+}
+
+test "LlamaEmbedding.embedBatch returns empty result for empty input" {
+    const allocator = std.testing.allocator;
+
+    var engine = try LlamaEmbedding.init(
+        allocator,
+        "/bin/sh",
+        "VERSION",
+    );
+    defer engine.deinit();
+
+    const embeddings = try engine.embedBatch(&.{});
+    defer allocator.free(embeddings);
+
+    try std.testing.expectEqual(@as(usize, 0), embeddings.len);
+}
+
+test "LlamaEmbedding.embed returns process error when subprocess fails" {
+    const allocator = std.testing.allocator;
+
+    var engine = try LlamaEmbedding.init(
+        allocator,
+        "/bin/sh",
+        "VERSION",
+    );
+    defer engine.deinit();
+
+    const result = engine.embed("hello world");
+    try std.testing.expectError(EmbeddingError.ProcessFailed, result);
+}
