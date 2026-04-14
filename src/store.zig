@@ -112,7 +112,7 @@ pub fn insertContent(db_: *db.Db, content: []const u8) StoreError![SHA256_HEX_LE
     return hash;
 }
 
-pub fn findActiveDocument(db_: *db.Db, collection: []const u8, path: []const u8) StoreError!ActiveDocument {
+pub fn findActiveDocument(db_: *db.Db, collection: []const u8, path: []const u8, allocator: std.mem.Allocator) StoreError!ActiveDocument {
     const sql = "SELECT d.id, d.title, d.hash, c.doc FROM documents d JOIN content c ON d.hash = c.hash WHERE d.collection = ? AND d.path = ? AND d.active = 1";
     var stmt = try db_.prepare(sql);
     defer stmt.finalize();
@@ -125,9 +125,9 @@ pub fn findActiveDocument(db_: *db.Db, collection: []const u8, path: []const u8)
     const hsh = stmt.columnText(2);
     const d = stmt.columnText(3);
 
-    const title_copy = if (ttl) |t| try std.heap.page_allocator.dupe(u8, std.mem.span(t)) else try std.heap.page_allocator.dupe(u8, "");
-    const hash_copy = if (hsh) |h| try std.heap.page_allocator.dupe(u8, std.mem.span(h)) else try std.heap.page_allocator.dupe(u8, "");
-    const doc_copy = if (d) |doc_txt| try std.heap.page_allocator.dupe(u8, std.mem.span(doc_txt)) else try std.heap.page_allocator.dupe(u8, "");
+    const title_copy = if (ttl) |t| try allocator.dupe(u8, std.mem.span(t)) else try allocator.dupe(u8, "");
+    const hash_copy = if (hsh) |h| try allocator.dupe(u8, std.mem.span(h)) else try allocator.dupe(u8, "");
+    const doc_copy = if (d) |doc_txt| try allocator.dupe(u8, std.mem.span(doc_txt)) else try allocator.dupe(u8, "");
 
     return .{
         .id = stmt.columnInt(0),
@@ -154,24 +154,24 @@ pub fn findActiveDocumentHash(db_: *db.Db, collection: []const u8, path: []const
     return out;
 }
 
-pub fn getActiveDocumentPaths(db_: *db.Db, collection: []const u8) StoreError!struct { paths: std.ArrayList([]const u8), titles: std.ArrayList([]const u8) } {
+pub fn getActiveDocumentPaths(db_: *db.Db, collection: []const u8, allocator: std.mem.Allocator) StoreError!struct { paths: std.ArrayList([]const u8), titles: std.ArrayList([]const u8) } {
     const sql = "SELECT path, title FROM documents WHERE collection = ? AND active = 1 ORDER BY path";
     var stmt = try db_.prepare(sql);
     defer stmt.finalize();
     try stmt.bindText(1, collection);
 
-    var paths = try std.ArrayList([]const u8).initCapacity(std.heap.page_allocator, 0);
-    errdefer paths.deinit(std.heap.page_allocator);
-    var titles = try std.ArrayList([]const u8).initCapacity(std.heap.page_allocator, 0);
-    errdefer titles.deinit(std.heap.page_allocator);
+    var paths = try std.ArrayList([]const u8).initCapacity(allocator, 0);
+    errdefer paths.deinit(allocator);
+    var titles = try std.ArrayList([]const u8).initCapacity(allocator, 0);
+    errdefer titles.deinit(allocator);
 
     while (try stmt.step()) {
         const pth = stmt.columnText(0);
         const ttl = stmt.columnText(1);
-        const path = if (pth) |p| try std.heap.page_allocator.dupe(u8, std.mem.span(p)) else try std.heap.page_allocator.dupe(u8, "");
-        const title = if (ttl) |t| try std.heap.page_allocator.dupe(u8, std.mem.span(t)) else try std.heap.page_allocator.dupe(u8, "");
-        try paths.append(std.heap.page_allocator, path);
-        try titles.append(std.heap.page_allocator, title);
+        const path = if (pth) |p| try allocator.dupe(u8, std.mem.span(p)) else try allocator.dupe(u8, "");
+        const title = if (ttl) |t| try allocator.dupe(u8, std.mem.span(t)) else try allocator.dupe(u8, "");
+        try paths.append(allocator, path);
+        try titles.append(allocator, title);
     }
 
     return .{ .paths = paths, .titles = titles };
@@ -384,11 +384,11 @@ test "findActiveDocument returns document" {
 
     try insertDocument(&db_, "notes", "test.md", "# Test Doc\n\nHello world");
 
-    const doc = try findActiveDocument(&db_, "notes", "test.md");
+    const doc = try findActiveDocument(&db_, "notes", "test.md", std.testing.allocator);
     defer {
-        std.heap.page_allocator.free(doc.title);
-        std.heap.page_allocator.free(doc.hash);
-        std.heap.page_allocator.free(doc.doc);
+        std.testing.allocator.free(doc.title);
+        std.testing.allocator.free(doc.hash);
+        std.testing.allocator.free(doc.doc);
     }
     try std.testing.expectEqualStrings("Test Doc", doc.title);
     try std.testing.expect(doc.id > 0);
@@ -402,7 +402,7 @@ test "deactivateDocument marks inactive" {
     try insertDocument(&db_, "notes", "test.md", "# Test\n\nContent");
     try deactivateDocument(&db_, "notes", "test.md");
 
-    const result = findActiveDocument(&db_, "notes", "test.md");
+    const result = findActiveDocument(&db_, "notes", "test.md", std.testing.allocator);
     try std.testing.expectError(StoreError.NotFound, result);
 }
 
@@ -424,12 +424,12 @@ test "getActiveDocumentPaths returns all paths" {
     try insertDocument(&db_, "notes", "a.md", "# A\n\nContent");
     try insertDocument(&db_, "notes", "b.md", "# B\n\nContent");
 
-    var result = try getActiveDocumentPaths(&db_, "notes");
+    var result = try getActiveDocumentPaths(&db_, "notes", std.testing.allocator);
     defer {
-        for (result.paths.items) |p| std.heap.page_allocator.free(p);
-        for (result.titles.items) |t| std.heap.page_allocator.free(t);
-        result.paths.deinit(std.heap.page_allocator);
-        result.titles.deinit(std.heap.page_allocator);
+        for (result.paths.items) |p| std.testing.allocator.free(p);
+        for (result.titles.items) |t| std.testing.allocator.free(t);
+        result.paths.deinit(std.testing.allocator);
+        result.titles.deinit(std.testing.allocator);
     }
     try std.testing.expectEqual(@as(usize, 2), result.paths.items.len);
 }
@@ -440,7 +440,12 @@ test "upsertContentVector stores embedding JSON" {
     try db.initSchema(&db_);
 
     try insertDocument(&db_, "notes", "a.md", "# A\n\ncontent");
-    const doc = try findActiveDocument(&db_, "notes", "a.md");
+    const doc = try findActiveDocument(&db_, "notes", "a.md", std.testing.allocator);
+    defer {
+        std.testing.allocator.free(doc.title);
+        std.testing.allocator.free(doc.hash);
+        std.testing.allocator.free(doc.doc);
+    }
 
     try upsertContentVector(&db_, doc.hash, "test-model", &.{ 0.1, 0.2, -0.3 }, std.testing.allocator);
 
@@ -461,11 +466,11 @@ test "upsertContentVectorAt stores multiple chunk vectors" {
     try db.initSchema(&db_);
 
     try insertDocument(&db_, "notes", "a.md", "# A\n\ncontent");
-    const doc = try findActiveDocument(&db_, "notes", "a.md");
+    const doc = try findActiveDocument(&db_, "notes", "a.md", std.testing.allocator);
     defer {
-        std.heap.page_allocator.free(doc.title);
-        std.heap.page_allocator.free(doc.hash);
-        std.heap.page_allocator.free(doc.doc);
+        std.testing.allocator.free(doc.title);
+        std.testing.allocator.free(doc.hash);
+        std.testing.allocator.free(doc.doc);
     }
 
     try upsertContentVectorAt(&db_, doc.hash, 0, 0, "test-model", &.{ 0.1, 0.2 }, std.testing.allocator);
@@ -491,11 +496,11 @@ test "insertDocument replaces active row for same path" {
     try std.testing.expect(try stmt.step());
     try std.testing.expectEqual(@as(i64, 1), stmt.columnInt(0));
 
-    const doc = try findActiveDocument(&db_, "notes", "same.md");
+    const doc = try findActiveDocument(&db_, "notes", "same.md", std.testing.allocator);
     defer {
-        std.heap.page_allocator.free(doc.title);
-        std.heap.page_allocator.free(doc.hash);
-        std.heap.page_allocator.free(doc.doc);
+        std.testing.allocator.free(doc.title);
+        std.testing.allocator.free(doc.hash);
+        std.testing.allocator.free(doc.doc);
     }
     try std.testing.expectEqualStrings("Second", doc.title);
 }

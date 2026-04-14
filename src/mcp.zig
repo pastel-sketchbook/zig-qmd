@@ -229,13 +229,13 @@ pub const McpServer = struct {
         if (std.mem.eql(u8, tool_call.name, "get")) {
             const raw_path = tool_call.path orelse return McpError.InvalidParams;
             const parsed = root.parse_virtual_path(raw_path) orelse return McpError.InvalidParams;
-            const doc = store.findActiveDocument(&db_, parsed.collection, parsed.path) catch {
+            const doc = store.findActiveDocument(&db_, parsed.collection, parsed.path, allocator) catch {
                 return allocator.dupe(u8, "{\"content\":[{\"type\":\"text\",\"text\":\"document not found\"}]}") catch McpError.InvalidParams;
             };
             defer {
-                std.heap.page_allocator.free(doc.title);
-                std.heap.page_allocator.free(doc.hash);
-                std.heap.page_allocator.free(doc.doc);
+                allocator.free(doc.title);
+                allocator.free(doc.hash);
+                allocator.free(doc.doc);
             }
             var text = std.ArrayList(u8).initCapacity(allocator, doc.doc.len + 64) catch return McpError.InvalidParams;
             defer text.deinit(allocator);

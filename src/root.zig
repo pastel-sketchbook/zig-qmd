@@ -102,7 +102,7 @@ pub const Qmd = struct {
     }
 
     pub fn get(self: *Qmd, collection: []const u8, path: []const u8) !store.ActiveDocument {
-        return store.findActiveDocument(&self.db, collection, path);
+        return store.findActiveDocument(&self.db, collection, path, self.allocator);
     }
 };
 
@@ -154,9 +154,9 @@ test "ZMD open init add update search get" {
     try std.testing.expect(res.results.items.len >= 1);
 
     const doc = try engine.get("notes", "a.md");
-    defer std.heap.page_allocator.free(doc.title);
-    defer std.heap.page_allocator.free(doc.hash);
-    defer std.heap.page_allocator.free(doc.doc);
+    defer allocator.free(doc.title);
+    defer allocator.free(doc.hash);
+    defer allocator.free(doc.doc);
     try std.testing.expectEqualStrings("A", doc.title);
 }
 

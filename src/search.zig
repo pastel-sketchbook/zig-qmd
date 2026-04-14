@@ -326,11 +326,11 @@ pub fn hybridSearch(
         var title = r.title;
         var hash = r.hash;
         if (std.mem.eql(u8, title, "")) {
-            const doc = store.findActiveDocument(db_, r.collection, r.path) catch continue;
+            const doc = store.findActiveDocument(db_, r.collection, r.path, allocator) catch continue;
             defer {
-                std.heap.page_allocator.free(doc.title);
-                std.heap.page_allocator.free(doc.hash);
-                std.heap.page_allocator.free(doc.doc);
+                allocator.free(doc.title);
+                allocator.free(doc.hash);
+                allocator.free(doc.doc);
             }
             title = doc.title;
             hash = doc.hash;
@@ -389,12 +389,12 @@ fn rerankByEmbedding(db_: *db.Db, allocator: std.mem.Allocator, query: []const u
     errdefer allocator.free(rescored);
     for (results, 0..) |r, i| {
         var source_text = r.title;
-        const doc = store.findActiveDocument(db_, r.collection, r.path) catch null;
+        const doc = store.findActiveDocument(db_, r.collection, r.path, allocator) catch null;
         if (doc) |d| {
             defer {
-                std.heap.page_allocator.free(d.title);
-                std.heap.page_allocator.free(d.hash);
-                std.heap.page_allocator.free(d.doc);
+                allocator.free(d.title);
+                allocator.free(d.hash);
+                allocator.free(d.doc);
             }
             source_text = d.doc;
         }
@@ -722,8 +722,18 @@ test "searchVec uses stored vectors and ranks by cosine" {
     try store.insertDocument(&db_, "test", "a.md", "# Auth\nLogin and auth flow");
     try store.insertDocument(&db_, "test", "b.md", "# Cooking\nRecipe and food");
 
-    const doc_a = try store.findActiveDocument(&db_, "test", "a.md");
-    const doc_b = try store.findActiveDocument(&db_, "test", "b.md");
+    const doc_a = try store.findActiveDocument(&db_, "test", "a.md", std.testing.allocator);
+    defer {
+        std.testing.allocator.free(doc_a.title);
+        std.testing.allocator.free(doc_a.hash);
+        std.testing.allocator.free(doc_a.doc);
+    }
+    const doc_b = try store.findActiveDocument(&db_, "test", "b.md", std.testing.allocator);
+    defer {
+        std.testing.allocator.free(doc_b.title);
+        std.testing.allocator.free(doc_b.hash);
+        std.testing.allocator.free(doc_b.doc);
+    }
 
     // Match the current fallback embedding model for deterministic test behavior.
     var fallback = try llm.LlamaCpp.init("/nonexistent", std.heap.page_allocator);

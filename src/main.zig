@@ -540,11 +540,11 @@ pub fn main() !void {
                 try stdout.writeAll("[\n");
                 var first = true;
                 for (result.results.items) |r| {
-                    const doc = qmd.store.findActiveDocument(&db_, r.collection, r.path) catch continue;
+                    const doc = qmd.store.findActiveDocument(&db_, r.collection, r.path, allocator) catch continue;
                     defer {
-                        std.heap.page_allocator.free(doc.title);
-                        std.heap.page_allocator.free(doc.hash);
-                        std.heap.page_allocator.free(doc.doc);
+                        allocator.free(doc.title);
+                        allocator.free(doc.hash);
+                        allocator.free(doc.doc);
                     }
                     const snippet = try extractSnippet(allocator, query_text, doc.doc);
                     defer allocator.free(snippet);
@@ -567,11 +567,11 @@ pub fn main() !void {
             .csv => {
                 try stdout.writeAll("rank,collection,path,title,score,snippet\n");
                 for (result.results.items, 0..) |r, i| {
-                    const doc = qmd.store.findActiveDocument(&db_, r.collection, r.path) catch continue;
+                    const doc = qmd.store.findActiveDocument(&db_, r.collection, r.path, allocator) catch continue;
                     defer {
-                        std.heap.page_allocator.free(doc.title);
-                        std.heap.page_allocator.free(doc.hash);
-                        std.heap.page_allocator.free(doc.doc);
+                        allocator.free(doc.title);
+                        allocator.free(doc.hash);
+                        allocator.free(doc.doc);
                     }
                     const snippet = try extractSnippet(allocator, query_text, doc.doc);
                     defer allocator.free(snippet);
@@ -589,11 +589,11 @@ pub fn main() !void {
             .md => {
                 try stdout.writeAll("| rank | score | path | title | snippet |\n|---:|---:|---|---|---|\n");
                 for (result.results.items, 0..) |r, i| {
-                    const doc = qmd.store.findActiveDocument(&db_, r.collection, r.path) catch continue;
+                    const doc = qmd.store.findActiveDocument(&db_, r.collection, r.path, allocator) catch continue;
                     defer {
-                        std.heap.page_allocator.free(doc.title);
-                        std.heap.page_allocator.free(doc.hash);
-                        std.heap.page_allocator.free(doc.doc);
+                        allocator.free(doc.title);
+                        allocator.free(doc.hash);
+                        allocator.free(doc.doc);
                     }
                     const snippet = try extractSnippet(allocator, query_text, doc.doc);
                     defer allocator.free(snippet);
@@ -605,11 +605,11 @@ pub fn main() !void {
                     try stdout.writeAll("No context results found.\n");
                 } else {
                     for (result.results.items, 0..) |r, i| {
-                        const doc = qmd.store.findActiveDocument(&db_, r.collection, r.path) catch continue;
+                        const doc = qmd.store.findActiveDocument(&db_, r.collection, r.path, allocator) catch continue;
                         defer {
-                            std.heap.page_allocator.free(doc.title);
-                            std.heap.page_allocator.free(doc.hash);
-                            std.heap.page_allocator.free(doc.doc);
+                            allocator.free(doc.title);
+                            allocator.free(doc.hash);
+                            allocator.free(doc.doc);
                         }
                         const snippet = try extractSnippet(allocator, query_text, doc.doc);
                         defer allocator.free(snippet);
@@ -828,15 +828,15 @@ pub fn main() !void {
             return;
         };
 
-        const doc = qmd.store.findActiveDocument(&db_, ref.collection, ref.path) catch {
+        const doc = qmd.store.findActiveDocument(&db_, ref.collection, ref.path, allocator) catch {
             try stdout.writeAll("Document not found.\n");
             try stdout.flush();
             return;
         };
         defer {
-            std.heap.page_allocator.free(doc.title);
-            std.heap.page_allocator.free(doc.hash);
-            std.heap.page_allocator.free(doc.doc);
+            allocator.free(doc.title);
+            allocator.free(doc.hash);
+            allocator.free(doc.doc);
         }
 
         try stdout.writeAll("Title: ");
@@ -889,14 +889,14 @@ pub fn main() !void {
                         try stdout.print("Skipping invalid ref: {s}\n", .{raw_ref});
                         continue;
                     };
-                    const doc = qmd.store.findActiveDocument(&db_, ref.collection, ref.path) catch {
+                    const doc = qmd.store.findActiveDocument(&db_, ref.collection, ref.path, allocator) catch {
                         try stdout.print("Not found: zmd://{s}/{s}\n", .{ ref.collection, ref.path });
                         continue;
                     };
                     defer {
-                        std.heap.page_allocator.free(doc.title);
-                        std.heap.page_allocator.free(doc.hash);
-                        std.heap.page_allocator.free(doc.doc);
+                        allocator.free(doc.title);
+                        allocator.free(doc.hash);
+                        allocator.free(doc.doc);
                     }
 
                     if (i > 0) try stdout.writeAll("\n---\n\n");
@@ -911,11 +911,11 @@ pub fn main() !void {
                 var first = true;
                 for (refs.items) |raw_ref| {
                     const ref = parseDocRef(raw_ref) orelse continue;
-                    const doc = qmd.store.findActiveDocument(&db_, ref.collection, ref.path) catch continue;
+                    const doc = qmd.store.findActiveDocument(&db_, ref.collection, ref.path, allocator) catch continue;
                     defer {
-                        std.heap.page_allocator.free(doc.title);
-                        std.heap.page_allocator.free(doc.hash);
-                        std.heap.page_allocator.free(doc.doc);
+                        allocator.free(doc.title);
+                        allocator.free(doc.hash);
+                        allocator.free(doc.doc);
                     }
                     if (!first) try stdout.writeAll(",\n");
                     first = false;
@@ -943,11 +943,11 @@ pub fn main() !void {
                 try stdout.writeAll("collection,path,virtual_path,title,hash,doc\n");
                 for (refs.items) |raw_ref| {
                     const ref = parseDocRef(raw_ref) orelse continue;
-                    const doc = qmd.store.findActiveDocument(&db_, ref.collection, ref.path) catch continue;
+                    const doc = qmd.store.findActiveDocument(&db_, ref.collection, ref.path, allocator) catch continue;
                     defer {
-                        std.heap.page_allocator.free(doc.title);
-                        std.heap.page_allocator.free(doc.hash);
-                        std.heap.page_allocator.free(doc.doc);
+                        allocator.free(doc.title);
+                        allocator.free(doc.hash);
+                        allocator.free(doc.doc);
                     }
                     const vpath = try std.fmt.allocPrint(allocator, "zmd://{s}/{s}", .{ ref.collection, ref.path });
 
@@ -969,11 +969,11 @@ pub fn main() !void {
             .md => {
                 for (refs.items, 0..) |raw_ref, i| {
                     const ref = parseDocRef(raw_ref) orelse continue;
-                    const doc = qmd.store.findActiveDocument(&db_, ref.collection, ref.path) catch continue;
+                    const doc = qmd.store.findActiveDocument(&db_, ref.collection, ref.path, allocator) catch continue;
                     defer {
-                        std.heap.page_allocator.free(doc.title);
-                        std.heap.page_allocator.free(doc.hash);
-                        std.heap.page_allocator.free(doc.doc);
+                        allocator.free(doc.title);
+                        allocator.free(doc.hash);
+                        allocator.free(doc.doc);
                     }
                     if (i > 0) try stdout.writeAll("\n\n---\n\n");
                     try stdout.print("## {s}\n\n", .{doc.title});
@@ -1045,16 +1045,16 @@ pub fn main() !void {
         const col: ?[]const u8 = if (collection_name) |n| n else null;
 
         if (col) |c| {
-            var result = qmd.store.getActiveDocumentPaths(&db_, c) catch {
+            var result = qmd.store.getActiveDocumentPaths(&db_, c, allocator) catch {
                 try stdout.writeAll("Failed to list documents.\n");
                 try stdout.flush();
                 return;
             };
             defer {
-                for (result.paths.items) |p| std.heap.page_allocator.free(p);
-                for (result.titles.items) |t| std.heap.page_allocator.free(t);
-                result.paths.deinit(std.heap.page_allocator);
-                result.titles.deinit(std.heap.page_allocator);
+                for (result.paths.items) |p| allocator.free(p);
+                for (result.titles.items) |t| allocator.free(t);
+                result.paths.deinit(allocator);
+                result.titles.deinit(allocator);
             }
 
             for (result.paths.items, result.titles.items) |path, title| {
@@ -1070,12 +1070,12 @@ pub fn main() !void {
 
             for (result.collections.items) |c_| {
                 try stdout.print("Collection: {s} ({s})\n", .{ c_.name, c_.path });
-                var docs = qmd.store.getActiveDocumentPaths(&db_, c_.name) catch continue;
+                var docs = qmd.store.getActiveDocumentPaths(&db_, c_.name, allocator) catch continue;
                 defer {
-                    for (docs.paths.items) |p| std.heap.page_allocator.free(p);
-                    for (docs.titles.items) |t| std.heap.page_allocator.free(t);
-                    docs.paths.deinit(std.heap.page_allocator);
-                    docs.titles.deinit(std.heap.page_allocator);
+                    for (docs.paths.items) |p| allocator.free(p);
+                    for (docs.titles.items) |t| allocator.free(t);
+                    docs.paths.deinit(allocator);
+                    docs.titles.deinit(allocator);
                 }
                 for (docs.paths.items, docs.titles.items) |path, title| {
                     try stdout.print("  zmd://{s}/{s}: {s}\n", .{ c_.name, path, title });
