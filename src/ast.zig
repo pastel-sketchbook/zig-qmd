@@ -6,60 +6,121 @@ pub const AstError = error{
     OutOfMemory,
 };
 
+pub const BreakpointKind = enum {
+    heading,
+    fence,
+    list_item,
+    paragraph,
+};
+
+pub const Breakpoint = struct {
+    offset: usize,
+    kind: BreakpointKind,
+};
+
 pub const AstChunker = struct {
     language: []const u8,
-    breakpoints: []const u32,
+    allocator: std.mem.Allocator,
+    breakpoints: std.ArrayList(Breakpoint),
 
-    pub fn init(language: []const u8) AstChunker {
+    pub fn init(allocator: std.mem.Allocator, language: []const u8) AstChunker {
         return .{
             .language = language,
-            .breakpoints = &.{},
+            .allocator = allocator,
+            .breakpoints = std.ArrayList(Breakpoint).initCapacity(allocator, 0) catch unreachable,
         };
     }
 
     pub fn deinit(self: *AstChunker) void {
-        _ = self;
+        self.breakpoints.deinit(self.allocator);
     }
 
-    pub fn extractBreakpoints(self: *AstChunker, content: []const u8) []u32 {
-        _ = self;
-        var buf: [1024]u32 = undefined;
-        var count: usize = 0;
-        for (content, 0..) |c, i| {
-            if (c == '\n' and count < 1024) {
-                buf[count] = @as(u32, @intCast(i));
-                count += 1;
-            }
-        }
-        return buf[0..count];
-    }
+    pub fn extractBreakpoints(self: *AstChunker, content: []const u8) ![]Breakpoint {
+        self.breakpoints.clearRetainingCapacity();
 
-    pub fn chunk(self: *AstChunker, content: []const u8, max_size: usize) [][]const u8 {
-        var chunks = std.ArrayList([]const u8).initCapacity(std.heap.page_allocator, 0) catch return &.{};
-        errdefer chunks.deinit(std.heap.page_allocator);
-        var pos: usize = 0;
+        var line_start: usize = 0;
+        var in_fence = false;
+        while (line_start < content.len) {
+            const next_nl = std.mem.indexOfScalarPos(u8, content, line_start, '\n') orelse content.len;
+            const line = content[line_start..next_nl];
+            const trimmed = std.mem.trim(u8, line, &.{ ' ', '\t', '\r' });
 
-        while (pos < content.len) {
-            const end = pos + max_size;
-            if (end >= content.len) {
-                chunks.append(std.heap.page_allocator, content[pos..]) catch {};
-                break;
-            }
-
-            var cut = end;
-            for (self.breakpoints) |bp| {
-                if (bp > pos and bp < end) {
-                    cut = bp;
+            if (trimmed.len >= 3 and std.mem.startsWith(u8, trimmed, "```")) {
+                in_fence = !in_fence;
+                try self.breakpoints.append(self.allocator, .{ .offset = line_start, .kind = .fence });
+            } else if (!in_fence and is_heading(trimmed)) {
+                try self.breakpoints.append(self.allocator, .{ .offset = line_start, .kind = .heading });
+            } else if (!in_fence and is_list_item(trimmed)) {
+                try self.breakpoints.append(self.allocator, .{ .offset = line_start, .kind = .list_item });
+            } else if (!in_fence and trimmed.len == 0) {
+                const para_start = next_nl + 1;
+                if (para_start < content.len) {
+                    try self.breakpoints.append(self.allocator, .{ .offset = para_start, .kind = .paragraph });
                 }
             }
 
-            chunks.append(std.heap.page_allocator, content[pos..cut]) catch {};
+            if (next_nl >= content.len) break;
+            line_start = next_nl + 1;
+        }
+
+        std.sort.heap(Breakpoint, self.breakpoints.items, {}, struct {
+            fn less(_: void, a: Breakpoint, b: Breakpoint) bool {
+                return a.offset < b.offset;
+            }
+        }.less);
+
+        return self.breakpoints.items;
+    }
+
+    pub fn chunk(self: *AstChunker, content: []const u8, max_size: usize) !std.ArrayList([]const u8) {
+        _ = try self.extractBreakpoints(content);
+
+        var chunks = try std.ArrayList([]const u8).initCapacity(self.allocator, 8);
+        errdefer chunks.deinit(self.allocator);
+
+        if (content.len == 0) return chunks;
+
+        var pos: usize = 0;
+        while (pos < content.len) {
+            const target_end = @min(content.len, pos + max_size);
+            if (target_end == content.len) {
+                try chunks.append(self.allocator, content[pos..content.len]);
+                break;
+            }
+
+            var cut = find_last_breakpoint_before(self.breakpoints.items, pos, target_end) orelse target_end;
+            if (cut <= pos) cut = target_end;
+
+            try chunks.append(self.allocator, content[pos..cut]);
             pos = cut;
         }
 
-        return chunks.items;
+        return chunks;
     }
 };
+
+fn is_heading(line: []const u8) bool {
+    if (line.len < 2) return false;
+    var i: usize = 0;
+    while (i < line.len and line[i] == '#') : (i += 1) {}
+    return i > 0 and i < line.len and line[i] == ' ';
+}
+
+fn is_list_item(line: []const u8) bool {
+    if (line.len >= 2 and (line[0] == '-' or line[0] == '*' or line[0] == '+') and line[1] == ' ') return true;
+    if (line.len >= 3 and std.ascii.isDigit(line[0]) and line[1] == '.' and line[2] == ' ') return true;
+    return false;
+}
+
+fn find_last_breakpoint_before(bps: []const Breakpoint, min_offset: usize, max_offset: usize) ?usize {
+    var best: ?usize = null;
+    for (bps) |bp| {
+        if (bp.offset > min_offset and bp.offset <= max_offset) {
+            best = bp.offset;
+        }
+    }
+    return best;
+}
 
 pub fn detectLanguage(filename: []const u8) []const u8 {
     if (std.mem.endsWith(u8, filename, ".ts")) return "typescript";
@@ -72,28 +133,26 @@ pub fn detectLanguage(filename: []const u8) []const u8 {
     return "text";
 }
 
-pub fn mergeBreakpoints(a: []const u32, b: []const u32) []u32 {
-    var merged = std.ArrayList(u32).initCapacity(std.heap.page_allocator, a.len + b.len) catch return &.{};
-    errdefer merged.deinit(std.heap.page_allocator);
-    var i: usize = 0;
-    var j: usize = 0;
+test "AstChunker extracts heading and fence breakpoints" {
+    var chunker = AstChunker.init(std.testing.allocator, "markdown");
+    defer chunker.deinit();
 
-    while (i < a.len or j < b.len) {
-        if (j >= b.len or (i < a.len and a[i] < b[j])) {
-            merged.append(std.heap.page_allocator, a[i]) catch {};
-            i += 1;
-        } else {
-            merged.append(std.heap.page_allocator, b[j]) catch {};
-            j += 1;
-        }
-    }
-
-    return merged.items;
+    const content = "# Title\n\ntext\n```zig\nconst a = 1;\n```\n## Next\n";
+    const bps = try chunker.extractBreakpoints(content);
+    try std.testing.expect(bps.len >= 3);
 }
 
-test "AstChunker can be initialized" {
-    const chunker = AstChunker.init("javascript");
-    try std.testing.expectEqualStrings("javascript", chunker.language);
+test "AstChunker chunk splits by semantic breakpoints" {
+    var chunker = AstChunker.init(std.testing.allocator, "markdown");
+    defer chunker.deinit();
+
+    const content =
+        "# H1\n\nparagraph 1\n\n## H2\n\nparagraph 2\n\n## H3\n\nparagraph 3\n";
+    var chunks = try chunker.chunk(content, 24);
+    defer chunks.deinit(std.testing.allocator);
+
+    try std.testing.expect(chunks.items.len >= 2);
+    try std.testing.expect(std.mem.indexOf(u8, chunks.items[0], "# H1") != null);
 }
 
 test "detectLanguage recognizes file types" {
@@ -101,11 +160,4 @@ test "detectLanguage recognizes file types" {
     try std.testing.expectEqualStrings("python", detectLanguage("file.py"));
     try std.testing.expectEqualStrings("markdown", detectLanguage("file.md"));
     try std.testing.expectEqualStrings("text", detectLanguage("file.unknown"));
-}
-
-test "mergeBreakpoints combines lists" {
-    const a: []const u32 = &.{ 1, 5, 10 };
-    const b: []const u32 = &.{ 3, 7, 12 };
-    const merged = mergeBreakpoints(a, b);
-    try std.testing.expect(merged.len >= 0);
 }
