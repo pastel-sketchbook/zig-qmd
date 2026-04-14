@@ -315,13 +315,30 @@ pub fn main() !void {
                         continue;
                     };
 
-                    var chunks = qmd.chunker.chunkDocument(content);
-                    defer chunks.chunks.deinit(std.heap.page_allocator);
+                    var chunk_slices = std.ArrayList([]const u8).initCapacity(allocator, 0) catch {
+                        total_indexed += 1;
+                        continue;
+                    };
+                    defer chunk_slices.deinit(allocator);
+
+                    if (std.mem.eql(u8, qmd.ast.detectLanguage(entry.path), "markdown")) {
+                        var ast_chunker = qmd.ast.AstChunker.init(allocator, "markdown");
+                        defer ast_chunker.deinit();
+                        var ast_chunks = ast_chunker.chunk(content, 1200) catch std.ArrayList([]const u8).initCapacity(allocator, 0) catch unreachable;
+                        defer ast_chunks.deinit(allocator);
+                        try chunk_slices.appendSlice(allocator, ast_chunks.items);
+                    }
+
+                    if (chunk_slices.items.len == 0) {
+                        var chunks = qmd.chunker.chunkDocument(content);
+                        defer chunks.chunks.deinit(std.heap.page_allocator);
+                        try chunk_slices.appendSlice(allocator, chunks.chunks.items);
+                    }
 
                     if (make_embedding_engine(allocator)) |engine_instance| {
                         var engine = engine_instance;
                         defer engine.deinit();
-                        for (chunks.chunks.items, 0..) |chunk, idx| {
+                        for (chunk_slices.items, 0..) |chunk, idx| {
                             const formatted = qmd.llm.formatDocForEmbedding(allocator, chunk) catch continue;
                             defer allocator.free(formatted);
                             const emb = engine.embed(formatted) catch continue;
@@ -335,7 +352,7 @@ pub fn main() !void {
                             continue;
                         };
                         defer fallback.deinit();
-                        for (chunks.chunks.items, 0..) |chunk, idx| {
+                        for (chunk_slices.items, 0..) |chunk, idx| {
                             const formatted = qmd.llm.formatDocForEmbedding(allocator, chunk) catch continue;
                             defer allocator.free(formatted);
                             const emb = fallback.embed(formatted, allocator) catch continue;

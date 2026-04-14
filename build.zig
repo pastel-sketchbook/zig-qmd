@@ -36,13 +36,33 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // --- tree-sitter C static library ---
+    const treesitter = b.addLibrary(.{
+        .name = "treesitter",
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    treesitter.addIncludePath(b.path("deps/tree-sitter"));
+    treesitter.addIncludePath(b.path("deps/tree-sitter/src"));
+    treesitter.addIncludePath(b.path("deps/tree-sitter-markdown"));
+    treesitter.addCSourceFile(.{ .file = b.path("deps/tree-sitter/src/lib.c"), .flags = &.{} });
+    treesitter.addCSourceFile(.{ .file = b.path("deps/tree-sitter-markdown/parser.c"), .flags = &.{} });
+    treesitter.addCSourceFile(.{ .file = b.path("deps/tree-sitter-markdown/scanner.c"), .flags = &.{} });
+
     // --- Library module (SDK) ---
     const mod = b.addModule("qmd", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
     });
     mod.addIncludePath(b.path("deps"));
+    mod.addIncludePath(b.path("deps/tree-sitter"));
+    mod.addIncludePath(b.path("deps/tree-sitter/src"));
+    mod.addIncludePath(b.path("deps/tree-sitter-markdown"));
     mod.linkLibrary(sqlite);
+    mod.linkLibrary(treesitter);
 
     // --- CLI executable ---
     const exe = b.addExecutable(.{
@@ -57,6 +77,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     exe.linkLibrary(sqlite);
+    exe.linkLibrary(treesitter);
 
     b.installArtifact(exe);
 

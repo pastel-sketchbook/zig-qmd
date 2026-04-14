@@ -53,12 +53,26 @@ pub const Qmd = struct {
                 store.insertDocument(&self.db, col.name, entry.path, content) catch continue;
                 const doc_hash = store.findActiveDocumentHash(&self.db, col.name, entry.path) catch continue;
 
-                var chunks = chunker.chunkDocument(content);
-                defer chunks.chunks.deinit(std.heap.page_allocator);
+                var chunk_slices = try std.ArrayList([]const u8).initCapacity(self.allocator, 0);
+                defer chunk_slices.deinit(self.allocator);
+
+                if (std.mem.eql(u8, ast.detectLanguage(entry.path), "markdown")) {
+                    var ast_chunker = ast.AstChunker.init(self.allocator, "markdown");
+                    defer ast_chunker.deinit();
+                    var ast_chunks = ast_chunker.chunk(content, 1200) catch std.ArrayList([]const u8).initCapacity(self.allocator, 0) catch unreachable;
+                    defer ast_chunks.deinit(self.allocator);
+                    try chunk_slices.appendSlice(self.allocator, ast_chunks.items);
+                }
+
+                if (chunk_slices.items.len == 0) {
+                    var chunks = chunker.chunkDocument(content);
+                    defer chunks.chunks.deinit(std.heap.page_allocator);
+                    try chunk_slices.appendSlice(self.allocator, chunks.chunks.items);
+                }
 
                 var fallback = llm.LlamaCpp.init("/nonexistent", self.allocator) catch continue;
                 defer fallback.deinit();
-                for (chunks.chunks.items, 0..) |c, idx| {
+                for (chunk_slices.items, 0..) |c, idx| {
                     const formatted = llm.formatDocForEmbedding(self.allocator, c) catch continue;
                     defer self.allocator.free(formatted);
                     const emb = fallback.embed(formatted, self.allocator) catch continue;

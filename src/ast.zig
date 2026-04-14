@@ -1,4 +1,9 @@
 const std = @import("std");
+const c = @cImport({
+    @cInclude("tree_sitter/api.h");
+});
+
+extern fn tree_sitter_markdown() ?*const c.TSLanguage;
 
 pub const AstError = error{
     ParseError,
@@ -37,6 +42,18 @@ pub const AstChunker = struct {
 
     pub fn extractBreakpoints(self: *AstChunker, content: []const u8) ![]Breakpoint {
         self.breakpoints.clearRetainingCapacity();
+
+        if (std.mem.eql(u8, self.language, "markdown")) {
+            try extract_with_tree_sitter(self, content);
+            if (self.breakpoints.items.len > 0) {
+                std.sort.heap(Breakpoint, self.breakpoints.items, {}, struct {
+                    fn less(_: void, a: Breakpoint, b: Breakpoint) bool {
+                        return a.offset < b.offset;
+                    }
+                }.less);
+                return self.breakpoints.items;
+            }
+        }
 
         var line_start: usize = 0;
         var in_fence = false;
@@ -104,6 +121,42 @@ fn is_heading(line: []const u8) bool {
     var i: usize = 0;
     while (i < line.len and line[i] == '#') : (i += 1) {}
     return i > 0 and i < line.len and line[i] == ' ';
+}
+
+fn extract_with_tree_sitter(self: *AstChunker, content: []const u8) !void {
+    const parser = c.ts_parser_new() orelse return;
+    defer c.ts_parser_delete(parser);
+
+    const lang = tree_sitter_markdown() orelse return;
+    if (!c.ts_parser_set_language(parser, lang)) return;
+
+    const tree = c.ts_parser_parse_string(parser, null, content.ptr, @intCast(content.len)) orelse return;
+    defer c.ts_tree_delete(tree);
+
+    const root_node = c.ts_tree_root_node(tree);
+    try walk_node(self, root_node);
+}
+
+fn walk_node(self: *AstChunker, node: c.TSNode) !void {
+    if (c.ts_node_is_null(node)) return;
+
+    const kind = std.mem.span(c.ts_node_type(node));
+    if (std.mem.eql(u8, kind, "atx_heading") or
+        std.mem.eql(u8, kind, "setext_heading") or
+        std.mem.eql(u8, kind, "fenced_code_block") or
+        std.mem.eql(u8, kind, "list_item"))
+    {
+        try self.breakpoints.append(self.allocator, .{
+            .offset = @intCast(c.ts_node_start_byte(node)),
+            .kind = if (std.mem.eql(u8, kind, "fenced_code_block")) .fence else if (std.mem.eql(u8, kind, "list_item")) .list_item else .heading,
+        });
+    }
+
+    const child_count = c.ts_node_child_count(node);
+    var i: u32 = 0;
+    while (i < child_count) : (i += 1) {
+        try walk_node(self, c.ts_node_child(node, i));
+    }
 }
 
 fn is_list_item(line: []const u8) bool {
