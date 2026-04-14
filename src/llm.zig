@@ -247,24 +247,35 @@ fn scoreWithGeneration(allocator: std.mem.Allocator, query: []const u8, passage:
 }
 
 fn lexicalRelevanceScore(query: []const u8, passage: []const u8) f32 {
-    const allocator = std.heap.page_allocator;
-    const p_lower = allocator.alloc(u8, passage.len) catch return 0;
-    defer allocator.free(p_lower);
-    for (passage, 0..) |ch, i| p_lower[i] = std.ascii.toLower(ch);
-
     var matches: f32 = 0;
     var total: f32 = 0;
     var q_it = std.mem.tokenizeAny(u8, query, " \n\r\t,.;:!?()[]{}\"'");
     while (q_it.next()) |tok| {
         if (tok.len < 2) continue;
         total += 1;
-        const t_lower = allocator.alloc(u8, tok.len) catch continue;
-        defer allocator.free(t_lower);
-        for (tok, 0..) |ch, i| t_lower[i] = std.ascii.toLower(ch);
-        if (std.mem.indexOf(u8, p_lower, t_lower) != null) matches += 1;
+        if (containsAsciiCaseInsensitive(passage, tok)) matches += 1;
     }
     if (total == 0) return 0;
     return matches / total;
+}
+
+fn containsAsciiCaseInsensitive(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (needle.len > haystack.len) return false;
+
+    var start: usize = 0;
+    while (start + needle.len <= haystack.len) : (start += 1) {
+        var matched = true;
+        for (needle, 0..) |ch, offset| {
+            if (std.ascii.toLower(haystack[start + offset]) != std.ascii.toLower(ch)) {
+                matched = false;
+                break;
+            }
+        }
+        if (matched) return true;
+    }
+
+    return false;
 }
 
 pub const EMBEDDING_MAX_TEXT_LEN: usize = 2048;
@@ -358,15 +369,16 @@ pub fn dotProduct(a: []const f32, b: []const f32) f32 {
 }
 
 pub const LlmCache = struct {
+    allocator: std.mem.Allocator,
     entries: std.StringHashMap(CachedResult),
 
-    pub fn init() LlmCache {
-        return .{ .entries = std.StringHashMap(CachedResult).init(std.heap.page_allocator) };
+    pub fn init(allocator: std.mem.Allocator) LlmCache {
+        return .{ .allocator = allocator, .entries = std.StringHashMap(CachedResult).init(allocator) };
     }
 
     pub fn deinit(self: *LlmCache) void {
         var it = self.entries.iterator();
-        while (it.next()) |entry| std.heap.page_allocator.free(entry.key_ptr.*);
+        while (it.next()) |entry| self.allocator.free(entry.key_ptr.*);
         self.entries.deinit();
     }
 
@@ -375,13 +387,13 @@ pub const LlmCache = struct {
     }
 
     pub fn put(self: *LlmCache, key: []const u8, value: CachedResult) !void {
-        const key_copy = try std.heap.page_allocator.dupe(u8, key);
+        const key_copy = try self.allocator.dupe(u8, key);
         try self.entries.put(key_copy, value);
     }
 
     pub fn clear(self: *LlmCache) void {
         var it = self.entries.iterator();
-        while (it.next()) |entry| std.heap.page_allocator.free(entry.key_ptr.*);
+        while (it.next()) |entry| self.allocator.free(entry.key_ptr.*);
         self.entries.clearRetainingCapacity();
     }
 };
@@ -443,8 +455,8 @@ pub fn rerank(results: []const SimpleResult, query: []const u8) ![]SimpleResult 
     return results;
 }
 
-pub fn expandQuery(query: []const u8) ![]const u8 {
-    return expandQueryWithModel(std.heap.page_allocator, query, null, null) catch expandQueryHeuristic(query);
+pub fn expandQuery(allocator: std.mem.Allocator, query: []const u8) ![]const u8 {
+    return expandQueryWithModel(allocator, query, null, null) catch expandQueryHeuristic(allocator, query);
 }
 
 pub fn expandQueryWithModel(
@@ -454,16 +466,16 @@ pub fn expandQueryWithModel(
     maybe_model_path: ?[]const u8,
 ) ![]const u8 {
     if (maybe_binary_path == null or maybe_model_path == null) {
-        return expandQueryHeuristic(query);
+        return expandQueryHeuristic(allocator, query);
     }
 
-    const spec = parseModelSpec(maybe_model_path.?) catch return expandQueryHeuristic(query);
+    const spec = parseModelSpec(maybe_model_path.?) catch return expandQueryHeuristic(allocator, query);
 
     const prompt = std.fmt.allocPrint(
         allocator,
         "Expand this search query with short related keywords only. Return one line, comma-separated keywords. Query: {s}",
         .{query},
-    ) catch return expandQueryHeuristic(query);
+    ) catch return expandQueryHeuristic(allocator, query);
     defer allocator.free(prompt);
 
     var argv = try std.ArrayList([]const u8).initCapacity(allocator, 16);
@@ -492,16 +504,16 @@ pub fn expandQueryWithModel(
         .allocator = allocator,
         .argv = argv.items,
         .max_output_bytes = 16 * 1024,
-    }) catch return expandQueryHeuristic(query);
+    }) catch return expandQueryHeuristic(allocator, query);
     defer allocator.free(run_result.stdout);
     defer allocator.free(run_result.stderr);
 
     if (run_result.term != .Exited or run_result.term.Exited != 0 or run_result.stdout.len == 0) {
-        return expandQueryHeuristic(query);
+        return expandQueryHeuristic(allocator, query);
     }
 
     const trimmed = std.mem.trim(u8, run_result.stdout, &.{ ' ', '\n', '\r', '\t' });
-    if (trimmed.len == 0) return expandQueryHeuristic(query);
+    if (trimmed.len == 0) return expandQueryHeuristic(allocator, query);
 
     var merged = try std.ArrayList(u8).initCapacity(allocator, query.len + 1 + trimmed.len);
     defer merged.deinit(allocator);
@@ -511,17 +523,17 @@ pub fn expandQueryWithModel(
     return merged.toOwnedSlice(allocator);
 }
 
-fn expandQueryHeuristic(query: []const u8) ![]const u8 {
-    var expanded = try std.ArrayList(u8).initCapacity(std.heap.page_allocator, query.len);
-    errdefer expanded.deinit(std.heap.page_allocator);
-    try expanded.appendSlice(std.heap.page_allocator, query);
-    if (std.mem.indexOf(u8, query, "?") != null) try expanded.appendSlice(std.heap.page_allocator, " explain clarify");
-    if (std.mem.indexOf(u8, query, "how") != null) try expanded.appendSlice(std.heap.page_allocator, " method way steps procedure");
-    if (std.mem.indexOf(u8, query, "what") != null) try expanded.appendSlice(std.heap.page_allocator, " definition meaning information");
-    if (std.mem.indexOf(u8, query, "why") != null) try expanded.appendSlice(std.heap.page_allocator, " reason cause explanation");
-    if (std.mem.indexOf(u8, query, "where") != null) try expanded.appendSlice(std.heap.page_allocator, " location place");
-    if (std.mem.indexOf(u8, query, "when") != null) try expanded.appendSlice(std.heap.page_allocator, " time date schedule");
-    return expanded.toOwnedSlice(std.heap.page_allocator);
+fn expandQueryHeuristic(allocator: std.mem.Allocator, query: []const u8) ![]const u8 {
+    var expanded = try std.ArrayList(u8).initCapacity(allocator, query.len);
+    errdefer expanded.deinit(allocator);
+    try expanded.appendSlice(allocator, query);
+    if (std.mem.indexOf(u8, query, "?") != null) try expanded.appendSlice(allocator, " explain clarify");
+    if (std.mem.indexOf(u8, query, "how") != null) try expanded.appendSlice(allocator, " method way steps procedure");
+    if (std.mem.indexOf(u8, query, "what") != null) try expanded.appendSlice(allocator, " definition meaning information");
+    if (std.mem.indexOf(u8, query, "why") != null) try expanded.appendSlice(allocator, " reason cause explanation");
+    if (std.mem.indexOf(u8, query, "where") != null) try expanded.appendSlice(allocator, " location place");
+    if (std.mem.indexOf(u8, query, "when") != null) try expanded.appendSlice(allocator, " time date schedule");
+    return expanded.toOwnedSlice(allocator);
 }
 
 test "cosineSimilarity identical" {
@@ -535,7 +547,8 @@ test "cosineSimilarity orthogonal" {
 }
 
 test "expandQuery adds question terms" {
-    const expanded = try expandQuery("how to login");
+    const expanded = try expandQuery(std.testing.allocator, "how to login");
+    defer std.testing.allocator.free(expanded);
     try std.testing.expect(std.mem.indexOf(u8, expanded, "method").? > 0);
 }
 
@@ -576,7 +589,7 @@ test "formatDocForEmbedding truncates long input" {
 }
 
 test "LlmCache stores and retrieves" {
-    var cache = LlmCache.init();
+    var cache = LlmCache.init(std.testing.allocator);
     defer cache.deinit();
     try cache.put("key", .{ .response = "val", .created_at = 1 });
     try std.testing.expect(cache.get("key") != null);

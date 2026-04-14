@@ -440,7 +440,7 @@ pub fn main() !void {
             try stdout.flush();
             return;
         };
-        defer result.deinit(std.heap.page_allocator);
+        defer result.deinit(allocator);
 
         switch (output_format) {
             .text => {
@@ -533,7 +533,7 @@ pub fn main() !void {
             try stdout.flush();
             return;
         };
-        defer result.deinit(std.heap.page_allocator);
+        defer result.deinit(allocator);
 
         switch (output_format) {
             .json => {
@@ -661,7 +661,7 @@ pub fn main() !void {
             try stdout.flush();
             return;
         };
-        defer result.deinit(std.heap.page_allocator);
+        defer result.deinit(allocator);
 
         switch (output_format) {
             .text => {

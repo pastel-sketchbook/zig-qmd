@@ -8,8 +8,7 @@ pub const SearchError = error{
     NoResults,
 } || db.DbError;
 
-pub fn buildFTS5Query(input: []const u8) ![]u8 {
-    const allocator = std.heap.page_allocator;
+pub fn buildFTS5Query(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     var result_list = try std.ArrayList(u8).initCapacity(allocator, 0);
     defer result_list.deinit(allocator);
 
@@ -60,8 +59,8 @@ pub fn searchFTS(
     query: []const u8,
     collection: ?[]const u8,
 ) !SearchResults {
-    const fts_query = try buildFTS5Query(query);
-    defer std.heap.page_allocator.free(fts_query);
+    const fts_query = try buildFTS5Query(allocator, query);
+    defer allocator.free(fts_query);
 
     const base_sql = if (collection != null)
         "WITH ranked AS (SELECT d.id, d.collection, d.path, d.title, d.hash, bm25(documents_fts, 1.5, 4.0, 1.0) as score FROM documents_fts JOIN documents d ON documents_fts.rowid = d.id WHERE documents_fts MATCH ? AND d.collection = ?) SELECT id, collection, path, title, hash, score FROM ranked WHERE score < 0 ORDER BY score LIMIT 100"
@@ -133,10 +132,11 @@ const RankedEntry = struct {
 };
 
 pub fn reciprocalRankFusion(
+    allocator: std.mem.Allocator,
     result_lists: []const []const ScoredResult,
     k: f64,
 ) ![]ScoredResult {
-    var seen = std.AutoHashMap(i64, RankedEntry).init(std.heap.page_allocator);
+    var seen = std.AutoHashMap(i64, RankedEntry).init(allocator);
     defer seen.deinit();
 
     for (result_lists) |list| {
@@ -151,14 +151,17 @@ pub fn reciprocalRankFusion(
         }
     }
 
-    var ranked = try std.ArrayList(ScoredResult).initCapacity(std.heap.page_allocator, 0);
-    errdefer ranked.deinit(std.heap.page_allocator);
-    var entries = try std.ArrayList(struct { key: i64, score: f64, result: ScoredResult }).initCapacity(std.heap.page_allocator, 0);
-    errdefer entries.deinit(std.heap.page_allocator);
+    var ranked = try std.ArrayList(ScoredResult).initCapacity(allocator, 0);
+    errdefer {
+        freeScoredResultSlice(ranked.items, allocator);
+        ranked.deinit(allocator);
+    }
+    var entries = try std.ArrayList(struct { key: i64, score: f64, result: ScoredResult }).initCapacity(allocator, 0);
+    defer entries.deinit(allocator);
 
     var it = seen.iterator();
     while (it.next()) |entry| {
-        try entries.append(std.heap.page_allocator, .{ .key = entry.key_ptr.*, .score = entry.value_ptr.score, .result = entry.value_ptr.result });
+        try entries.append(allocator, .{ .key = entry.key_ptr.*, .score = entry.value_ptr.score, .result = entry.value_ptr.result });
     }
 
     std.sort.heap(@TypeOf(entries.items[0]), entries.items, {}, struct {
@@ -168,10 +171,10 @@ pub fn reciprocalRankFusion(
     }.less);
 
     for (entries.items) |entry| {
-        try ranked.append(std.heap.page_allocator, entry.result);
+        try ranked.append(allocator, try cloneScoredResult(allocator, entry.result));
     }
 
-    return ranked.items;
+    return ranked.toOwnedSlice(allocator);
 }
 
 pub const ScoredResult = struct {
@@ -199,6 +202,17 @@ fn freeScoredResultSlice(items: []ScoredResult, allocator: std.mem.Allocator) vo
         allocator.free(r.title);
         allocator.free(r.hash);
     }
+}
+
+fn cloneScoredResult(allocator: std.mem.Allocator, r: ScoredResult) !ScoredResult {
+    return .{
+        .id = r.id,
+        .collection = try allocator.dupe(u8, r.collection),
+        .path = try allocator.dupe(u8, r.path),
+        .title = try allocator.dupe(u8, r.title),
+        .hash = try allocator.dupe(u8, r.hash),
+        .score = r.score,
+    };
 }
 
 pub fn hybridSearch(
@@ -248,14 +262,28 @@ pub fn hybridSearch(
     }
 
     var fts_result = try searchFTS(db_, allocator, effective_query, collection);
-    defer fts_result.deinit(allocator);
 
     var fts_scored = try std.ArrayList(ScoredResult).initCapacity(allocator, fts_result.results.items.len);
-    errdefer fts_scored.deinit(allocator);
+    errdefer {
+        freeScoredResultSlice(fts_scored.items, allocator);
+        fts_scored.deinit(allocator);
+    }
 
     for (fts_result.results.items) |r| {
-        try fts_scored.append(allocator, .{ .id = r.id, .collection = r.collection, .path = r.path, .title = r.title, .hash = r.hash, .score = r.score });
+        try fts_scored.append(allocator, try cloneScoredResult(allocator, .{
+            .id = r.id,
+            .collection = r.collection,
+            .path = r.path,
+            .title = r.title,
+            .hash = r.hash,
+            .score = r.score,
+        }));
     }
+    defer {
+        freeScoredResultSlice(fts_scored.items, allocator);
+        fts_scored.deinit(allocator);
+    }
+    fts_result.deinit(allocator);
 
     var vec_scored: []ScoredResult = &.{};
     if (options.enable_vector) {
@@ -274,7 +302,7 @@ pub fn hybridSearch(
     lists[0] = fts_scored.items;
     lists[1] = vec_scored;
 
-    var fused = try reciprocalRankFusion(&lists, options.rrf_k);
+    var fused = try reciprocalRankFusion(allocator, &lists, options.rrf_k);
     defer allocator.free(fused);
 
     if (options.enable_rerank and fused.len > 1) {
@@ -282,9 +310,11 @@ pub fn hybridSearch(
             return .{ .results = try std.ArrayList(SearchResult).initCapacity(allocator, 0), .fts_count = 0, .vec_count = 0 };
         }
         const reranked = try rerankByEmbedding(db_, allocator, effective_query, fused);
+        freeScoredResultSlice(fused, allocator);
         allocator.free(fused);
         fused = reranked;
     }
+    defer freeScoredResultSlice(fused, allocator);
 
     var final_results = try std.ArrayList(SearchResult).initCapacity(allocator, @min(fused.len, options.max_results));
     errdefer {
@@ -298,9 +328,9 @@ pub fn hybridSearch(
         if (std.mem.eql(u8, title, "")) {
             const doc = store.findActiveDocument(db_, r.collection, r.path) catch continue;
             defer {
-                allocator.free(doc.title);
-                allocator.free(doc.hash);
-                allocator.free(doc.doc);
+                std.heap.page_allocator.free(doc.title);
+                std.heap.page_allocator.free(doc.hash);
+                std.heap.page_allocator.free(doc.doc);
             }
             title = doc.title;
             hash = doc.hash;
@@ -362,9 +392,9 @@ fn rerankByEmbedding(db_: *db.Db, allocator: std.mem.Allocator, query: []const u
         const doc = store.findActiveDocument(db_, r.collection, r.path) catch null;
         if (doc) |d| {
             defer {
-                allocator.free(d.title);
-                allocator.free(d.hash);
-                allocator.free(d.doc);
+                std.heap.page_allocator.free(d.title);
+                std.heap.page_allocator.free(d.hash);
+                std.heap.page_allocator.free(d.doc);
             }
             source_text = d.doc;
         }
@@ -508,7 +538,7 @@ pub fn searchVec(
         }
     }.less);
 
-    return .{ .results = results.items };
+    return .{ .results = try results.toOwnedSlice(allocator) };
 }
 
 fn searchVecNative(db_: *db.Db, allocator: std.mem.Allocator, query_embedding: []const f32, collection: ?[]const u8) ![]ScoredResult {
@@ -564,7 +594,7 @@ fn searchVecNative(db_: *db.Db, allocator: std.mem.Allocator, query_embedding: [
         }
     }.less);
 
-    return results.items;
+    return try results.toOwnedSlice(allocator);
 }
 
 fn encode_embedding_json(allocator: std.mem.Allocator, embedding: []const f32) ![]u8 {
@@ -646,6 +676,7 @@ test "embed_query uses real model when env is set" {
 }
 
 test "reciprocalRankFusion merges results" {
+    const allocator = std.testing.allocator;
     const list1: []const ScoredResult = &.{
         .{ .id = 1, .collection = "a", .path = "a", .title = "A", .hash = "", .score = 0.9 },
         .{ .id = 2, .collection = "a", .path = "b", .title = "B", .hash = "", .score = 0.8 },
@@ -655,7 +686,11 @@ test "reciprocalRankFusion merges results" {
         .{ .id = 3, .collection = "a", .path = "c", .title = "C", .hash = "", .score = 0.6 },
     };
 
-    const fused = try reciprocalRankFusion(&.{ list1, list2 }, RRF_K);
+    const fused = try reciprocalRankFusion(allocator, &.{ list1, list2 }, RRF_K);
+    defer {
+        freeScoredResultSlice(fused, allocator);
+        allocator.free(fused);
+    }
 
     try std.testing.expect(fused.len > 0);
     var seen2 = false;
@@ -761,25 +796,25 @@ test "hybridSearch supports abort signal" {
 }
 
 test "buildFTS5Query parses simple tokens" {
-    const result = try buildFTS5Query("hello world");
-    defer std.heap.page_allocator.free(result);
+    const result = try buildFTS5Query(std.testing.allocator, "hello world");
+    defer std.testing.allocator.free(result);
     try std.testing.expectEqualStrings("hello world", result);
 }
 
 test "buildFTS5Query handles negation" {
-    const result = try buildFTS5Query("hello -world");
-    defer std.heap.page_allocator.free(result);
+    const result = try buildFTS5Query(std.testing.allocator, "hello -world");
+    defer std.testing.allocator.free(result);
     try std.testing.expectEqualStrings("hello -world", result);
 }
 
 test "buildFTS5Query handles prefix match" {
-    const result = try buildFTS5Query("auth*");
-    defer std.heap.page_allocator.free(result);
+    const result = try buildFTS5Query(std.testing.allocator, "auth*");
+    defer std.testing.allocator.free(result);
     try std.testing.expectEqualStrings("auth*", result);
 }
 
 test "buildFTS5Query handles hyphenated words" {
-    const result = try buildFTS5Query("real-time");
-    defer std.heap.page_allocator.free(result);
+    const result = try buildFTS5Query(std.testing.allocator, "real-time");
+    defer std.testing.allocator.free(result);
     try std.testing.expectEqualStrings("\"real-time\"", result);
 }

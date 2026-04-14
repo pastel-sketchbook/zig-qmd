@@ -233,9 +233,9 @@ pub const McpServer = struct {
                 return allocator.dupe(u8, "{\"content\":[{\"type\":\"text\",\"text\":\"document not found\"}]}") catch McpError.InvalidParams;
             };
             defer {
-                allocator.free(doc.title);
-                allocator.free(doc.hash);
-                allocator.free(doc.doc);
+                std.heap.page_allocator.free(doc.title);
+                std.heap.page_allocator.free(doc.hash);
+                std.heap.page_allocator.free(doc.doc);
             }
             var text = std.ArrayList(u8).initCapacity(allocator, doc.doc.len + 64) catch return McpError.InvalidParams;
             defer text.deinit(allocator);
