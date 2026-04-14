@@ -182,17 +182,20 @@ pub fn main() !void {
         try stdout.writeAll("Commands:\n");
         try stdout.writeAll("  version     Show version\n");
         try stdout.writeAll("  collection  Manage collections (add/list/remove)\n");
-        try stdout.writeAll("  update     Update index for a collection\n");
-        try stdout.writeAll("  search     Full-text search\n");
-        try stdout.writeAll("  vsearch    Vector semantic search\n");
-        try stdout.writeAll("  query      Hybrid search (FTS + vector)\n");
-        try stdout.writeAll("  context    Context-rich search snippets\n");
-        try stdout.writeAll("  get        Get document by path\n");
-        try stdout.writeAll("  multi-get  Get multiple documents by path\n");
-        try stdout.writeAll("  status     Show system status\n");
-        try stdout.writeAll("  mcp        Start MCP server\n");
-        try stdout.writeAll("  ls         List documents\n");
-        try stdout.writeAll("  cleanup    Remove orphaned entries\n");
+        try stdout.writeAll("  update      Update index (syncs remote repos first)\n");
+        try stdout.writeAll("  search      Full-text search\n");
+        try stdout.writeAll("  vsearch     Vector semantic search\n");
+        try stdout.writeAll("  query       Hybrid search (FTS + vector)\n");
+        try stdout.writeAll("  context     Context-rich search snippets\n");
+        try stdout.writeAll("  get         Get document by path\n");
+        try stdout.writeAll("  multi-get   Get multiple documents by path\n");
+        try stdout.writeAll("  status      Show system status\n");
+        try stdout.writeAll("  mcp         Start MCP server\n");
+        try stdout.writeAll("  ls          List documents\n");
+        try stdout.writeAll("  cleanup     Remove orphaned entries\n");
+        try stdout.writeAll("\nCollections can be local paths or remote GitHub URLs:\n");
+        try stdout.writeAll("  zmd collection add notes ~/Documents/notes\n");
+        try stdout.writeAll("  zmd collection add laws https://github.com/org/repo\n");
         try stdout.flush();
         return;
     }
@@ -230,12 +233,12 @@ pub fn main() !void {
 
         if (std.mem.eql(u8, subcmd, "add")) {
             const name = args.next() orelse {
-                try stdout.writeAll("Usage: zmd collection add <name> <path>\n");
+                try stdout.writeAll("Usage: zmd collection add <name> <path|url>\n");
                 try stdout.flush();
                 return;
             };
             const path = args.next() orelse {
-                try stdout.writeAll("Usage: zmd collection add <name> <path>\n");
+                try stdout.writeAll("Usage: zmd collection add <name> <path|url>\n");
                 try stdout.flush();
                 return;
             };
@@ -250,7 +253,11 @@ pub fn main() !void {
             };
             try stdout.writeAll("Collection added: ");
             try stdout.writeAll(name);
-            try stdout.writeAll("\n");
+            if (qmd.remote.isRemoteUrl(path)) {
+                try stdout.writeAll(" (remote)\n");
+            } else {
+                try stdout.writeAll("\n");
+            }
             try stdout.flush();
             return;
         }
@@ -264,10 +271,14 @@ pub fn main() !void {
             defer qmd.config.freeCollections(&result);
 
             if (result.collections.items.len == 0) {
-                try stdout.writeAll("No collections. Run 'zmd collection add <name> <path>'\n");
+                try stdout.writeAll("No collections. Run 'zmd collection add <name> <path|url>'\n");
             } else {
                 for (result.collections.items) |col| {
-                    try stdout.print("  {s}: {s}\n", .{ col.name, col.path });
+                    if (qmd.remote.isRemoteUrl(col.path)) {
+                        try stdout.print("  {s}: {s} (remote)\n", .{ col.name, col.path });
+                    } else {
+                        try stdout.print("  {s}: {s}\n", .{ col.name, col.path });
+                    }
                 }
             }
             try stdout.flush();
@@ -335,11 +346,27 @@ pub fn main() !void {
         db_.exec("BEGIN") catch {};
 
         for (collections_result.collections.items) |col| {
-            try stdout.print("Indexing collection '{s}' from {s}...\n", .{ col.name, col.path });
+            // Resolve the local filesystem path (clone/pull for remote URLs)
+            var resolved_path: []const u8 = col.path;
+            var resolved_path_owned: ?[]u8 = null;
+            defer if (resolved_path_owned) |p| allocator.free(p);
+
+            if (qmd.remote.isRemoteUrl(col.path)) {
+                try stdout.print("Syncing remote collection '{s}' from {s}...\n", .{ col.name, col.path });
+                try stdout.flush();
+                resolved_path_owned = qmd.remote.syncRemote(allocator, col.path) catch |err| {
+                    try stdout.print("  Warning: Failed to sync remote {s}: {any}\n", .{ col.path, err });
+                    continue;
+                };
+                resolved_path = resolved_path_owned.?;
+                try stdout.print("  Cached at {s}\n", .{resolved_path});
+            }
+
+            try stdout.print("Indexing collection '{s}' from {s}...\n", .{ col.name, resolved_path });
             try stdout.flush();
 
-            var dir = std.fs.cwd().openDir(col.path, .{ .iterate = true }) catch {
-                try stdout.print("  Warning: Could not open directory {s}\n", .{col.path});
+            var dir = std.fs.cwd().openDir(resolved_path, .{ .iterate = true }) catch {
+                try stdout.print("  Warning: Could not open directory {s}\n", .{resolved_path});
                 continue;
             };
             defer dir.close();
@@ -353,7 +380,7 @@ pub fn main() !void {
             while (try walker.next()) |entry| {
                 if (entry.kind == .file and std.mem.endsWith(u8, entry.path, ".md")) {
                     var full_path_buf: [1024]u8 = undefined;
-                    const full_path = std.fmt.bufPrint(&full_path_buf, "{s}/{s}", .{ col.path, entry.path }) catch continue;
+                    const full_path = std.fmt.bufPrint(&full_path_buf, "{s}/{s}", .{ resolved_path, entry.path }) catch continue;
 
                     const content = std.fs.cwd().readFileAlloc(allocator, full_path, 1024 * 1024) catch |err| {
                         try stdout.print("    Error reading {s}: {any}\n", .{ entry.path, err });

@@ -14,7 +14,7 @@
 # Build
 zig build          # or: task build
 
-# Add a collection and index it
+# Add a local collection and index it
 zmd collection add notes ~/Documents/notes
 zmd update
 
@@ -24,6 +24,26 @@ zmd vsearch "how does login work"
 zmd query "quarterly planning decisions"
 zmd context "jujutsu"
 ```
+
+## Remote collections
+
+Collections can point to GitHub repositories. `zmd update` will shallow-clone
+(or pull) the repo automatically before indexing.
+
+```sh
+# Add a remote collection
+zmd collection add laws https://github.com/legalize-kr/legalize-kr
+
+# Clone and index (first run clones, subsequent runs pull)
+zmd update
+
+# Search works the same as local collections
+zmd search "민법"
+```
+
+Remote repos are cached under `.qmd/repos/<hash>/`. The hash is derived from
+the URL so each remote collection gets its own directory. Only a shallow clone
+(`--depth=1`) is performed to minimize bandwidth and disk usage.
 
 ## Search output
 
