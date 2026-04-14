@@ -264,3 +264,78 @@ test "handleRequest supports ping" {
     defer std.heap.page_allocator.free(resp);
     try std.testing.expect(std.mem.indexOf(u8, resp, "pong") != null);
 }
+
+const FakeReader = struct {
+    data: []const u8,
+    pos: usize = 0,
+
+    fn takeDelimiterExclusive(self: *FakeReader, delimiter: u8) ![]const u8 {
+        const start = self.pos;
+        while (self.pos < self.data.len and self.data[self.pos] != delimiter) : (self.pos += 1) {}
+        if (self.pos >= self.data.len) return error.EndOfStream;
+        const end = self.pos;
+        self.pos += 1;
+        return self.data[start..end];
+    }
+
+    fn readSliceAll(self: *FakeReader, out: []u8) !usize {
+        if (self.pos + out.len > self.data.len) return error.EndOfStream;
+        std.mem.copyForwards(u8, out, self.data[self.pos .. self.pos + out.len]);
+        self.pos += out.len;
+        return out.len;
+    }
+};
+
+const FakeWriter = struct {
+    buf: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+
+    fn print(self: *FakeWriter, comptime fmt: []const u8, args: anytype) !void {
+        try self.buf.writer(self.allocator).print(fmt, args);
+    }
+
+    fn writeAll(self: *FakeWriter, data: []const u8) !void {
+        try self.buf.appendSlice(self.allocator, data);
+    }
+
+    fn flush(_: *FakeWriter) !void {}
+};
+
+test "readMessage parses framed body" {
+    const framed = "Content-Length: 17\r\n\r\n{\"method\":\"ping\"}";
+    var reader = FakeReader{ .data = framed };
+
+    const body = try McpServer.readMessage(&reader, std.testing.allocator);
+    defer std.testing.allocator.free(body);
+    try std.testing.expectEqualStrings("{\"method\":\"ping\"}", body);
+}
+
+test "readMessage rejects missing content length" {
+    const framed = "X-Test: 1\r\n\r\n{}";
+    var reader = FakeReader{ .data = framed };
+    try std.testing.expectError(McpError.ParseError, McpServer.readMessage(&reader, std.testing.allocator));
+}
+
+test "writeMessage emits content-length framing" {
+    var buf = std.ArrayList(u8).initCapacity(std.testing.allocator, 0) catch unreachable;
+    defer buf.deinit(std.testing.allocator);
+
+    var writer = FakeWriter{ .buf = &buf, .allocator = std.testing.allocator };
+    try McpServer.writeMessage(&writer, "{}");
+
+    try std.testing.expect(std.mem.startsWith(u8, buf.items, "Content-Length: 2\r\n\r\n{}"));
+}
+
+test "writeMessage and readMessage roundtrip" {
+    var out = std.ArrayList(u8).initCapacity(std.testing.allocator, 0) catch unreachable;
+    defer out.deinit(std.testing.allocator);
+
+    var writer = FakeWriter{ .buf = &out, .allocator = std.testing.allocator };
+    const payload = "{\"jsonrpc\":\"2.0\",\"method\":\"ping\"}";
+    try McpServer.writeMessage(&writer, payload);
+
+    var reader = FakeReader{ .data = out.items };
+    const body = try McpServer.readMessage(&reader, std.testing.allocator);
+    defer std.testing.allocator.free(body);
+    try std.testing.expectEqualStrings(payload, body);
+}
