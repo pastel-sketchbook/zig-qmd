@@ -165,6 +165,18 @@ pub fn upsertContentVector(
     embedding: []const f32,
     allocator: std.mem.Allocator,
 ) StoreError!void {
+    return upsertContentVectorAt(db_, hash, 0, 0, model, embedding, allocator);
+}
+
+pub fn upsertContentVectorAt(
+    db_: *db.Db,
+    hash: []const u8,
+    seq: i64,
+    pos: i64,
+    model: []const u8,
+    embedding: []const f32,
+    allocator: std.mem.Allocator,
+) StoreError!void {
     var emb_json = try std.ArrayList(u8).initCapacity(allocator, embedding.len * 10 + 2);
     defer emb_json.deinit(allocator);
 
@@ -177,14 +189,16 @@ pub fn upsertContentVector(
 
     const now = "2024-01-01T00:00:00Z";
     var stmt = try db_.prepare(
-        "INSERT OR REPLACE INTO content_vectors (hash, seq, pos, model, embedding, embedded_at) VALUES (?, 0, 0, ?, ?, ?)",
+        "INSERT OR REPLACE INTO content_vectors (hash, seq, pos, model, embedding, embedded_at) VALUES (?, ?, ?, ?, ?, ?)",
     );
     defer stmt.finalize();
 
     try stmt.bindText(1, hash);
-    try stmt.bindText(2, model);
-    try stmt.bindText(3, emb_json.items);
-    try stmt.bindText(4, now);
+    try stmt.bindInt(2, @intCast(seq));
+    try stmt.bindInt(3, @intCast(pos));
+    try stmt.bindText(4, model);
+    try stmt.bindText(5, emb_json.items);
+    try stmt.bindText(6, now);
     _ = try stmt.step();
 }
 
@@ -350,6 +364,29 @@ test "upsertContentVector stores embedding JSON" {
     const embedding = stmt.columnText(1).?;
     try std.testing.expectEqualStrings("test-model", std.mem.span(model));
     try std.testing.expect(std.mem.indexOf(u8, std.mem.span(embedding), "0.1") != null);
+}
+
+test "upsertContentVectorAt stores multiple chunk vectors" {
+    var db_ = try db.Db.open(":memory:");
+    defer db_.close();
+    try db.initSchema(&db_);
+
+    try insertDocument(&db_, "notes", "a.md", "# A\n\ncontent");
+    const doc = try findActiveDocument(&db_, "notes", "a.md");
+    defer {
+        std.heap.page_allocator.free(doc.title);
+        std.heap.page_allocator.free(doc.hash);
+        std.heap.page_allocator.free(doc.doc);
+    }
+
+    try upsertContentVectorAt(&db_, doc.hash, 0, 0, "test-model", &.{ 0.1, 0.2 }, std.testing.allocator);
+    try upsertContentVectorAt(&db_, doc.hash, 1, 0, "test-model", &.{ 0.3, 0.4 }, std.testing.allocator);
+
+    var stmt = try db_.prepare("SELECT count(*) FROM content_vectors WHERE hash = ?");
+    defer stmt.finalize();
+    try stmt.bindText(1, doc.hash);
+    try std.testing.expect(try stmt.step());
+    try std.testing.expectEqual(@as(i64, 2), stmt.columnInt(0));
 }
 
 test "cleanupOrphans removes inactive content and vectors" {

@@ -314,20 +314,19 @@ pub fn main() !void {
                         continue;
                     };
 
+                    var chunks = qmd.chunker.chunkDocument(content);
+                    defer chunks.chunks.deinit(std.heap.page_allocator);
+
                     if (make_embedding_engine(allocator)) |engine_instance| {
                         var engine = engine_instance;
                         defer engine.deinit();
-                        const formatted = qmd.llm.formatDocForEmbedding(allocator, content) catch {
-                            total_indexed += 1;
-                            continue;
-                        };
-                        defer allocator.free(formatted);
-                        const emb = engine.embed(formatted) catch {
-                            total_indexed += 1;
-                            continue;
-                        };
-                        defer allocator.free(emb);
-                        qmd.store.upsertContentVector(&db_, doc_hash[0..], engine.model_path, emb, allocator) catch {};
+                        for (chunks.chunks.items, 0..) |chunk, idx| {
+                            const formatted = qmd.llm.formatDocForEmbedding(allocator, chunk) catch continue;
+                            defer allocator.free(formatted);
+                            const emb = engine.embed(formatted) catch continue;
+                            defer allocator.free(emb);
+                            qmd.store.upsertContentVectorAt(&db_, doc_hash[0..], @intCast(idx), 0, engine.model_path, emb, allocator) catch {};
+                        }
                     } else {
                         // fallback deterministic embedding for now
                         var fallback = qmd.llm.LlamaCpp.init("/nonexistent", allocator) catch {
@@ -335,17 +334,13 @@ pub fn main() !void {
                             continue;
                         };
                         defer fallback.deinit();
-                        const formatted = qmd.llm.formatDocForEmbedding(allocator, content) catch {
-                            total_indexed += 1;
-                            continue;
-                        };
-                        defer allocator.free(formatted);
-                        const emb = fallback.embed(formatted, allocator) catch {
-                            total_indexed += 1;
-                            continue;
-                        };
-                        defer allocator.free(emb);
-                        qmd.store.upsertContentVector(&db_, doc_hash[0..], "fallback-fnv", emb, allocator) catch {};
+                        for (chunks.chunks.items, 0..) |chunk, idx| {
+                            const formatted = qmd.llm.formatDocForEmbedding(allocator, chunk) catch continue;
+                            defer allocator.free(formatted);
+                            const emb = fallback.embed(formatted, allocator) catch continue;
+                            defer allocator.free(emb);
+                            qmd.store.upsertContentVectorAt(&db_, doc_hash[0..], @intCast(idx), 0, "fallback-fnv", emb, allocator) catch {};
+                        }
                     }
                     total_indexed += 1;
                 }

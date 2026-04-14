@@ -297,11 +297,11 @@ pub fn searchVec(
     const query_embedding = try embed_query(query);
     defer std.heap.page_allocator.free(query_embedding);
 
-    var results = try std.ArrayList(ScoredResult).initCapacity(std.heap.page_allocator, 0);
-    errdefer results.deinit(std.heap.page_allocator);
+    var best_by_doc = std.AutoHashMap(i64, ScoredResult).init(std.heap.page_allocator);
+    defer best_by_doc.deinit();
 
     var stmt = db_.prepare(
-        "SELECT d.id, d.hash, d.collection, d.path, d.title, cv.embedding FROM documents d LEFT JOIN content_vectors cv ON cv.hash = d.hash AND cv.seq = 0 AND cv.pos = 0 WHERE d.active = 1",
+        "SELECT d.id, d.hash, d.collection, d.path, d.title, cv.embedding FROM documents d LEFT JOIN content_vectors cv ON cv.hash = d.hash WHERE d.active = 1",
     ) catch return .{ .results = &.{} };
     defer stmt.finalize();
 
@@ -328,14 +328,30 @@ pub fn searchVec(
         defer std.heap.page_allocator.free(doc_embedding);
 
         const score = llm.cosineSimilarity(query_embedding, doc_embedding);
-        try results.append(std.heap.page_allocator, .{
+        const candidate = ScoredResult{
             .id = id,
             .collection = col,
             .path = path,
             .title = title,
             .hash = hash,
             .score = score,
-        });
+        };
+
+        if (best_by_doc.get(id)) |existing| {
+            if (candidate.score > existing.score) {
+                try best_by_doc.put(id, candidate);
+            }
+        } else {
+            try best_by_doc.put(id, candidate);
+        }
+    }
+
+    var results = try std.ArrayList(ScoredResult).initCapacity(std.heap.page_allocator, best_by_doc.count());
+    errdefer results.deinit(std.heap.page_allocator);
+
+    var it = best_by_doc.iterator();
+    while (it.next()) |entry| {
+        try results.append(std.heap.page_allocator, entry.value_ptr.*);
     }
 
     std.sort.heap(ScoredResult, results.items, {}, struct {

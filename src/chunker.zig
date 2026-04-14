@@ -108,7 +108,7 @@ pub fn chunkDocument(content: []const u8) struct { chunks: std.ArrayList([]const
         }
 
         const window_start = if (pos == 0) pos else pos + CHUNK_SIZE_CHARS - CHUNK_OVERLAP_CHARS;
-        const window_end = chunk_end;
+        var window_end = chunk_end;
         if (window_end > content.len) window_end = content.len;
 
         var cutoff = findBestCutoff(content, window_start, window_end);
