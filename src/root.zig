@@ -69,8 +69,8 @@ pub const Qmd = struct {
                 }
 
                 if (chunk_slices.items.len == 0) {
-                    var chunks = chunker.chunkDocument(content) catch continue;
-                    defer chunks.chunks.deinit(std.heap.page_allocator);
+                    var chunks = chunker.chunkDocument(content, self.allocator) catch continue;
+                    defer chunks.chunks.deinit(self.allocator);
                     try chunk_slices.appendSlice(self.allocator, chunks.chunks.items);
                 }
 

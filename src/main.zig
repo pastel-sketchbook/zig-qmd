@@ -339,11 +339,11 @@ pub fn main() !void {
                     }
 
                     if (chunk_slices.items.len == 0) {
-                        var chunks = qmd.chunker.chunkDocument(content) catch {
+                        var chunks = qmd.chunker.chunkDocument(content, allocator) catch {
                             total_indexed += 1;
                             continue;
                         };
-                        defer chunks.chunks.deinit(std.heap.page_allocator);
+                        defer chunks.chunks.deinit(allocator);
                         try chunk_slices.appendSlice(allocator, chunks.chunks.items);
                     }
 

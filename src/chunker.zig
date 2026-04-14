@@ -23,8 +23,8 @@ const CodeFence = struct {
     lang: []const u8,
 };
 
-pub fn findCodeFences(content: []const u8) !struct { fences: std.ArrayList(CodeFence) } {
-    var fences = try std.ArrayList(CodeFence).initCapacity(std.heap.page_allocator, 0);
+pub fn findCodeFences(content: []const u8, allocator: std.mem.Allocator) !struct { fences: std.ArrayList(CodeFence) } {
+    var fences = try std.ArrayList(CodeFence).initCapacity(allocator, 0);
     var i: usize = 0;
     var in_fence = false;
     var fence_start: usize = 0;
@@ -44,7 +44,7 @@ pub fn findCodeFences(content: []const u8) !struct { fences: std.ArrayList(CodeF
             } else {
                 var end = i;
                 while (end < content.len and content[end] != '\n') end += 1;
-                try fences.append(std.heap.page_allocator, .{ .start = fence_start, .end = end, .lang = content[lang_start..i] });
+                try fences.append(allocator, .{ .start = fence_start, .end = end, .lang = content[lang_start..i] });
                 in_fence = false;
                 i += 3;
                 continue;
@@ -91,11 +91,11 @@ pub fn findBestCutoff(content: []const u8, window_start: usize, window_end: usiz
     return best_pos;
 }
 
-pub fn chunkDocument(content: []const u8) !struct { chunks: std.ArrayList([]const u8) } {
-    var chunks = try std.ArrayList([]const u8).initCapacity(std.heap.page_allocator, 0);
+pub fn chunkDocument(content: []const u8, allocator: std.mem.Allocator) !struct { chunks: std.ArrayList([]const u8) } {
+    var chunks = try std.ArrayList([]const u8).initCapacity(allocator, 0);
 
     if (content.len <= CHUNK_SIZE_CHARS) {
-        try chunks.append(std.heap.page_allocator, content);
+        try chunks.append(allocator, content);
         return .{ .chunks = chunks };
     }
 
@@ -103,7 +103,7 @@ pub fn chunkDocument(content: []const u8) !struct { chunks: std.ArrayList([]cons
     while (pos < content.len) {
         const chunk_end = pos + CHUNK_SIZE_CHARS;
         if (chunk_end >= content.len) {
-            try chunks.append(std.heap.page_allocator, content[pos..content.len]);
+            try chunks.append(allocator, content[pos..content.len]);
             break;
         }
 
@@ -114,7 +114,7 @@ pub fn chunkDocument(content: []const u8) !struct { chunks: std.ArrayList([]cons
         var cutoff = findBestCutoff(content, window_start, window_end);
         if (cutoff <= pos) cutoff = chunk_end;
 
-        try chunks.append(std.heap.page_allocator, content[pos..cutoff]);
+        try chunks.append(allocator, content[pos..cutoff]);
         pos = cutoff;
     }
 
@@ -124,8 +124,8 @@ pub fn chunkDocument(content: []const u8) !struct { chunks: std.ArrayList([]cons
 test "findCodeFences finds fenced blocks" {
     const content = "# Hello\n```python\ndef hello():\n    pass\n```\n## Next";
 
-    const result = try findCodeFences(content);
-    defer result.fences.deinit();
+    const result = try findCodeFences(content, std.testing.allocator);
+    defer result.fences.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 1), result.fences.items.len);
     try std.testing.expectEqualStrings("python", result.fences.items[0].lang);
 }
@@ -138,22 +138,22 @@ test "findBestCutoff prefers heading" {
 
 test "chunkDocument splits long content" {
     const content = "# Title\n" ++ "x" ** 4000;
-    const result = try chunkDocument(content);
-    defer result.chunks.deinit();
+    const result = try chunkDocument(content, std.testing.allocator);
+    defer result.chunks.deinit(std.testing.allocator);
     try std.testing.expect(result.chunks.items.len > 1);
 }
 
 test "chunkDocument keeps short content whole" {
     const content = "# Short\n\nJust a brief note.";
-    const result = try chunkDocument(content);
-    defer result.chunks.deinit();
+    const result = try chunkDocument(content, std.testing.allocator);
+    defer result.chunks.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 1), result.chunks.items.len);
 }
 
 test "chunkDocument overlaps chunks" {
     const content = "a" ** 3500 ++ "\n## Section\n" ++ "b" ** 3500;
-    const result = try chunkDocument(content);
-    defer result.chunks.deinit();
+    const result = try chunkDocument(content, std.testing.allocator);
+    defer result.chunks.deinit(std.testing.allocator);
     if (result.chunks.items.len >= 2) {
         try std.testing.expect(result.chunks.items[1].len > CHUNK_OVERLAP_CHARS);
     }
