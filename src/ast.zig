@@ -5,12 +5,14 @@ const c = @cImport({
 
 extern fn tree_sitter_markdown() ?*const c.TSLanguage;
 
+/// Error set for AST chunking operations.
 pub const AstError = error{
     ParseError,
     UnsupportedLanguage,
     OutOfMemory,
 };
 
+/// Type of structural breakpoint in a document (heading, fence, list item, paragraph).
 pub const BreakpointKind = enum {
     heading,
     fence,
@@ -18,16 +20,19 @@ pub const BreakpointKind = enum {
     paragraph,
 };
 
+/// A structural breakpoint at a byte offset in the source document.
 pub const Breakpoint = struct {
     offset: usize,
     kind: BreakpointKind,
 };
 
+/// Tree-sitter-powered document chunker that splits content at semantic boundaries.
 pub const AstChunker = struct {
     language: []const u8,
     allocator: std.mem.Allocator,
     breakpoints: std.ArrayList(Breakpoint),
 
+    /// Creates an AstChunker for the given language.
     pub fn init(allocator: std.mem.Allocator, language: []const u8) !AstChunker {
         return .{
             .language = language,
@@ -36,10 +41,12 @@ pub const AstChunker = struct {
         };
     }
 
+    /// Frees internal breakpoint storage.
     pub fn deinit(self: *AstChunker) void {
         self.breakpoints.deinit(self.allocator);
     }
 
+    /// Finds structural breakpoints in the content using tree-sitter or regex fallback.
     pub fn extractBreakpoints(self: *AstChunker, content: []const u8) ![]Breakpoint {
         self.breakpoints.clearRetainingCapacity();
 
@@ -89,6 +96,7 @@ pub const AstChunker = struct {
         return self.breakpoints.items;
     }
 
+    /// Splits content into chunks bounded by max_size, cutting at semantic breakpoints.
     pub fn chunk(self: *AstChunker, content: []const u8, max_size: usize) !std.ArrayList([]const u8) {
         _ = try self.extractBreakpoints(content);
 
@@ -175,6 +183,7 @@ fn find_last_breakpoint_before(bps: []const Breakpoint, min_offset: usize, max_o
     return best;
 }
 
+/// Detects programming language from a filename extension.
 pub fn detectLanguage(filename: []const u8) []const u8 {
     if (std.mem.endsWith(u8, filename, ".ts")) return "typescript";
     if (std.mem.endsWith(u8, filename, ".js")) return "javascript";

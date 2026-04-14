@@ -3,11 +3,14 @@ const db = @import("db.zig");
 const store = @import("store.zig");
 const llm = @import("llm.zig");
 
+/// Error set for search operations.
 pub const SearchError = error{
     QueryFailed,
     NoResults,
 } || db.DbError;
 
+/// Parses user input into an FTS5 query string, handling negation, prefix
+/// matching, and hyphenated terms.
 pub fn buildFTS5Query(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     var result_list = try std.ArrayList(u8).initCapacity(allocator, 0);
     defer result_list.deinit(allocator);
@@ -53,6 +56,8 @@ pub fn buildFTS5Query(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     return try result_list.toOwnedSlice(allocator);
 }
 
+/// Executes a BM25 full-text search against the documents FTS5 index,
+/// optionally filtered by collection.
 pub fn searchFTS(
     db_: *db.Db,
     allocator: std.mem.Allocator,
@@ -106,6 +111,7 @@ pub fn searchFTS(
     return .{ .results = results };
 }
 
+/// Container for FTS search results with deallocation support.
 pub const SearchResults = struct {
     results: std.ArrayList(SearchResult),
 
@@ -115,6 +121,7 @@ pub const SearchResults = struct {
     }
 };
 
+/// A single FTS search result with score and document metadata.
 pub const SearchResult = struct {
     id: i64,
     collection: []const u8,
@@ -124,6 +131,7 @@ pub const SearchResult = struct {
     score: f64,
 };
 
+/// Reciprocal Rank Fusion constant (k=60) controlling rank blending.
 pub const RRF_K = 60;
 
 const RankedEntry = struct {
@@ -131,6 +139,8 @@ const RankedEntry = struct {
     result: ScoredResult,
 };
 
+/// Merges multiple ranked result lists using RRF scoring, returning a
+/// unified ranking.
 pub fn reciprocalRankFusion(
     allocator: std.mem.Allocator,
     result_lists: []const []const ScoredResult,
@@ -177,6 +187,7 @@ pub fn reciprocalRankFusion(
     return ranked.toOwnedSlice(allocator);
 }
 
+/// A search result with a combined relevance score.
 pub const ScoredResult = struct {
     id: i64,
     collection: []const u8,
@@ -215,6 +226,8 @@ fn cloneScoredResult(allocator: std.mem.Allocator, r: ScoredResult) !ScoredResul
     };
 }
 
+/// Executes a full hybrid search pipeline: FTS + optional vector search,
+/// RRF fusion, and optional LLM reranking.
 pub fn hybridSearch(
     db_: *db.Db,
     allocator: std.mem.Allocator,
@@ -348,6 +361,7 @@ pub fn hybridSearch(
     return .{ .results = final_results, .fts_count = fts_scored.items.len, .vec_count = vec_scored.len };
 }
 
+/// Configuration options for the hybrid search pipeline.
 pub const HybridOptions = struct {
     enable_vector: bool = false,
     enable_query_expansion: bool = false,
@@ -450,6 +464,7 @@ fn rerankByEmbedding(db_: *db.Db, allocator: std.mem.Allocator, query: []const u
     return rescored;
 }
 
+/// Results from a hybrid search including FTS and vector match counts.
 pub const HybridResult = struct {
     results: std.ArrayList(SearchResult),
     fts_count: usize,
@@ -461,6 +476,8 @@ pub const HybridResult = struct {
     }
 };
 
+/// Executes vector similarity search using stored embeddings, deduplicating
+/// by document.
 pub fn searchVec(
     db_: *db.Db,
     allocator: std.mem.Allocator,
@@ -517,7 +534,18 @@ pub fn searchVec(
 
         if (best_by_doc.get(id)) |existing| {
             if (candidate.score > existing.score) {
+                // Free the strings from the entry being replaced
+                allocator.free(existing.collection);
+                allocator.free(existing.path);
+                allocator.free(existing.title);
+                allocator.free(existing.hash);
                 try best_by_doc.put(id, candidate);
+            } else {
+                // Discard the candidate — free its strings
+                allocator.free(col);
+                allocator.free(path);
+                allocator.free(title);
+                allocator.free(hash);
             }
         } else {
             try best_by_doc.put(id, candidate);
@@ -576,7 +604,16 @@ fn searchVecNative(db_: *db.Db, allocator: std.mem.Allocator, query_embedding: [
         const candidate = ScoredResult{ .id = id, .collection = col, .path = path, .title = title, .hash = hash, .score = score };
         if (best_by_doc.get(id)) |existing| {
             if (candidate.score > existing.score) {
+                allocator.free(existing.collection);
+                allocator.free(existing.path);
+                allocator.free(existing.title);
+                allocator.free(existing.hash);
                 try best_by_doc.put(id, candidate);
+            } else {
+                allocator.free(col);
+                allocator.free(path);
+                allocator.free(title);
+                allocator.free(hash);
             }
         } else {
             try best_by_doc.put(id, candidate);

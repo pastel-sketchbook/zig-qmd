@@ -39,10 +39,11 @@ const ParsedToolCall = struct {
     }
 };
 
+/// MCP (Model Context Protocol) server for exposing ZMD tools over JSON-RPC.
 pub const McpServer = struct {
-    pub fn run() !void {
-        const allocator = std.heap.page_allocator;
-
+    /// Run the MCP server loop, reading requests from stdin and writing responses to stdout.
+    /// The caller must provide an allocator for all dynamic memory used during the session.
+    pub fn run(allocator: std.mem.Allocator) !void {
         var stdin_buffer: [4096]u8 = undefined;
         var stdin_reader = std.fs.File.stdin().reader(&stdin_buffer);
         const stdin = &stdin_reader.interface;
@@ -60,8 +61,11 @@ pub const McpServer = struct {
                     allocator,
                     "{{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{{\"code\":-32600,\"message\":\"{s}\"}}}}",
                     .{@errorName(err)},
-                ) catch "{}";
-                defer if (!std.mem.eql(u8, err_json, "{}")) allocator.free(err_json);
+                ) catch {
+                    try writeMessage(stdout, "{}");
+                    continue;
+                };
+                defer allocator.free(err_json);
                 try writeMessage(stdout, err_json);
                 continue;
             };

@@ -2,6 +2,7 @@ const std = @import("std");
 const db = @import("db.zig");
 const crypto = std.crypto;
 
+/// Error set for document store operations.
 pub const StoreError = error{
     InsertFailed,
     NotFound,
@@ -11,6 +12,7 @@ pub const StoreError = error{
 
 const SHA256_HEX_LEN = 64;
 
+/// Represents a document fetched from the store with its metadata.
 pub const ActiveDocument = struct {
     id: i64,
     title: []const u8,
@@ -18,6 +20,7 @@ pub const ActiveDocument = struct {
     doc: []const u8,
 };
 
+/// Computes SHA-256 hex digest of content into a fixed-size buffer.
 pub fn hashContent(content: []const u8, out: *[SHA256_HEX_LEN:0]u8) void {
     var hash: [32]u8 = undefined;
     crypto.hash.sha2.Sha256.hash(content, &hash, .{});
@@ -27,6 +30,7 @@ pub fn hashContent(content: []const u8, out: *[SHA256_HEX_LEN:0]u8) void {
     }
 }
 
+/// Normalizes a file path into a lowercase alphanumeric handle.
 pub fn handleize(path: []const u8, out: *[SHA256_HEX_LEN]u8) void {
     const normalized = std.mem.trim(u8, path, &.{ ' ', '\t', '\n', '\r' });
     var result: [SHA256_HEX_LEN]u8 = undefined;
@@ -48,6 +52,7 @@ pub fn handleize(path: []const u8, out: *[SHA256_HEX_LEN]u8) void {
     if (i < SHA256_HEX_LEN) out.*[i] = 0;
 }
 
+/// Extracts a document title from YAML frontmatter or the first markdown heading.
 pub fn extractTitle(content: []const u8) []const u8 {
     var lines = std.mem.splitScalar(u8, content, '\n');
 
@@ -96,6 +101,7 @@ pub fn extractTitle(content: []const u8) []const u8 {
     return "Untitled";
 }
 
+/// Inserts content into the content-addressable store, returning its SHA-256 hash.
 pub fn insertContent(db_: *db.Db, content: []const u8) StoreError![SHA256_HEX_LEN]u8 {
     var hash: [SHA256_HEX_LEN:0]u8 = undefined;
     hashContent(content, &hash);
@@ -112,6 +118,7 @@ pub fn insertContent(db_: *db.Db, content: []const u8) StoreError![SHA256_HEX_LE
     return hash;
 }
 
+/// Looks up an active document by collection and path, returning its metadata and content.
 pub fn findActiveDocument(db_: *db.Db, collection: []const u8, path: []const u8, allocator: std.mem.Allocator) StoreError!ActiveDocument {
     const sql = "SELECT d.id, d.title, d.hash, c.doc FROM documents d JOIN content c ON d.hash = c.hash WHERE d.collection = ? AND d.path = ? AND d.active = 1";
     var stmt = try db_.prepare(sql);
@@ -137,6 +144,7 @@ pub fn findActiveDocument(db_: *db.Db, collection: []const u8, path: []const u8,
     };
 }
 
+/// Returns the content hash of an active document by collection and path.
 pub fn findActiveDocumentHash(db_: *db.Db, collection: []const u8, path: []const u8) StoreError![SHA256_HEX_LEN]u8 {
     const sql = "SELECT d.hash FROM documents d WHERE d.collection = ? AND d.path = ? AND d.active = 1";
     var stmt = try db_.prepare(sql);
@@ -154,6 +162,7 @@ pub fn findActiveDocumentHash(db_: *db.Db, collection: []const u8, path: []const
     return out;
 }
 
+/// Lists all active document paths and titles within a collection.
 pub fn getActiveDocumentPaths(db_: *db.Db, collection: []const u8, allocator: std.mem.Allocator) StoreError!struct { paths: std.ArrayList([]const u8), titles: std.ArrayList([]const u8) } {
     const sql = "SELECT path, title FROM documents WHERE collection = ? AND active = 1 ORDER BY path";
     var stmt = try db_.prepare(sql);
@@ -177,6 +186,7 @@ pub fn getActiveDocumentPaths(db_: *db.Db, collection: []const u8, allocator: st
     return .{ .paths = paths, .titles = titles };
 }
 
+/// Marks a document as inactive (soft delete) by collection and path.
 pub fn deactivateDocument(db_: *db.Db, collection: []const u8, path: []const u8) StoreError!void {
     const sql = "UPDATE documents SET active = 0 WHERE collection = ? AND path = ? AND active = 1";
     var stmt = try db_.prepare(sql);
@@ -186,6 +196,7 @@ pub fn deactivateDocument(db_: *db.Db, collection: []const u8, path: []const u8)
     _ = try stmt.step();
 }
 
+/// Inserts or replaces a document in the store, extracting title and computing content hash.
 pub fn insertDocument(db_: *db.Db, collection: []const u8, path: []const u8, content: []const u8) StoreError!void {
     const hash = try insertContent(db_, content);
 
@@ -204,6 +215,7 @@ pub fn insertDocument(db_: *db.Db, collection: []const u8, path: []const u8, con
     _ = try stmt.step();
 }
 
+/// Stores a vector embedding for a document's content hash at default position.
 pub fn upsertContentVector(
     db_: *db.Db,
     hash: []const u8,
@@ -214,6 +226,7 @@ pub fn upsertContentVector(
     return upsertContentVectorAt(db_, hash, 0, 0, model, embedding, allocator);
 }
 
+/// Stores a vector embedding for a specific chunk (seq/pos) of a document's content.
 pub fn upsertContentVectorAt(
     db_: *db.Db,
     hash: []const u8,
@@ -264,11 +277,13 @@ pub fn upsertContentVectorAt(
     _ = try ins_idx.step();
 }
 
+/// Statistics returned by the orphan cleanup operation.
 pub const CleanupStats = struct {
     removed_content: i64,
     removed_vectors: i64,
 };
 
+/// Removes content and vectors not referenced by any active document.
 pub fn cleanupOrphans(db_: *db.Db) StoreError!CleanupStats {
     const orphan_content = try countOrphanContent(db_);
     const orphan_vectors = try countOrphanVectors(db_);
@@ -289,6 +304,7 @@ pub fn cleanupOrphans(db_: *db.Db) StoreError!CleanupStats {
     };
 }
 
+/// Runs SQLite VACUUM to reclaim disk space.
 pub fn vacuum(db_: *db.Db) StoreError!void {
     try db_.exec("VACUUM");
 }

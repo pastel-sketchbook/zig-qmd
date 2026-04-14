@@ -1,11 +1,13 @@
 const std = @import("std");
 const db = @import("db.zig");
 
+/// Error set for collection configuration operations.
 pub const ConfigError = error{
     NotFound,
     AlreadyExists,
 } || db.DbError;
 
+/// Represents a configured document collection with its path and indexing settings.
 pub const Collection = struct {
     name: []const u8,
     path: []const u8,
@@ -16,11 +18,13 @@ pub const Collection = struct {
     context: ?[]const u8,
 };
 
+/// Container for a list of collections returned by `listCollections`.
 pub const CollectionsResult = struct {
     collections: std.ArrayList(Collection),
     allocator: std.mem.Allocator,
 };
 
+/// Registers a new collection with the given name and filesystem path.
 pub fn addCollection(
     db_: *db.Db,
     name: []const u8,
@@ -34,6 +38,7 @@ pub fn addCollection(
     _ = try stmt.step();
 }
 
+/// Returns all registered collections ordered by name.
 pub fn listCollections(db_: *db.Db, allocator: std.mem.Allocator) !CollectionsResult {
     const sql = "SELECT name, path, pattern, ignore_patterns, include_by_default, update_command, context FROM store_collections ORDER BY name";
     var stmt = try db_.prepare(sql);
@@ -72,6 +77,7 @@ pub fn listCollections(db_: *db.Db, allocator: std.mem.Allocator) !CollectionsRe
     return .{ .collections = collections, .allocator = allocator };
 }
 
+/// Frees all memory allocated by `listCollections`.
 pub fn freeCollections(result: *CollectionsResult) void {
     const allocator = result.allocator;
     for (result.collections.items) |col| {
@@ -85,6 +91,7 @@ pub fn freeCollections(result: *CollectionsResult) void {
     result.collections.deinit(allocator);
 }
 
+/// Looks up a single collection by name.
 pub fn getCollectionByName(db_: *db.Db, name: []const u8, allocator: std.mem.Allocator) !Collection {
     const sql = "SELECT name, path, pattern, ignore_patterns, include_by_default, update_command, context FROM store_collections WHERE name = ?";
     var stmt = try db_.prepare(sql);
@@ -119,6 +126,7 @@ pub fn getCollectionByName(db_: *db.Db, name: []const u8, allocator: std.mem.All
     };
 }
 
+/// Deletes a collection registration by name.
 pub fn removeCollection(db_: *db.Db, name: []const u8) ConfigError!void {
     const sql = "DELETE FROM store_collections WHERE name = ?";
     var stmt = try db_.prepare(sql);

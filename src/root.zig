@@ -12,6 +12,7 @@ pub const ast = @import("ast.zig");
 /// ZMD library version, kept in sync with the VERSION file.
 pub const version = "0.1.0";
 
+/// High-level QMD engine providing collection management, indexing, and search.
 pub const Qmd = struct {
     allocator: std.mem.Allocator,
     db: db.Db,
@@ -22,14 +23,17 @@ pub const Qmd = struct {
         return .{ .allocator = allocator, .db = conn };
     }
 
+    /// Closes the underlying database connection.
     pub fn close(self: *Qmd) void {
         self.db.close();
     }
 
+    /// Registers a new collection by name and filesystem path.
     pub fn add_collection(self: *Qmd, name: []const u8, path: []const u8) !void {
         try config.addCollection(&self.db, name, path);
     }
 
+    /// Scans all collection directories, indexes markdown files, and generates embeddings.
     pub fn update(self: *Qmd) !usize {
         var collections_result = try config.listCollections(&self.db, self.allocator);
         defer config.freeCollections(&collections_result);
@@ -93,19 +97,23 @@ pub const Qmd = struct {
         return total_indexed;
     }
 
+    /// Performs a BM25 full-text search, optionally filtered by collection.
     pub fn search_fts(self: *Qmd, query_text: []const u8, collection: ?[]const u8) !search.SearchResults {
         return search.searchFTS(&self.db, self.allocator, query_text, collection);
     }
 
+    /// Performs a hybrid search combining FTS and vector results with RRF fusion.
     pub fn query_hybrid(self: *Qmd, query_text: []const u8, options: search.HybridOptions) !search.HybridResult {
         return search.hybridSearch(&self.db, self.allocator, query_text, null, options);
     }
 
+    /// Retrieves a document by collection and path.
     pub fn get(self: *Qmd, collection: []const u8, path: []const u8) !store.ActiveDocument {
         return store.findActiveDocument(&self.db, collection, path, self.allocator);
     }
 };
 
+/// Parses a "zmd://collection/path" or "collection/path" string into its components.
 pub fn parse_virtual_path(input: []const u8) ?struct { collection: []const u8, path: []const u8 } {
     const raw = if (std.mem.startsWith(u8, input, "zmd://"))
         input[6..]

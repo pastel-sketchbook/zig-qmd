@@ -20,6 +20,7 @@ pub fn build(b: *std.Build) void {
             "-DSQLITE_ENABLE_JSON1",
             "-DSQLITE_THREADSAFE=1",
             "-DSQLITE_DQS=0",
+            "-fno-sanitize=undefined", // SQLite has known-benign UB (FTS5 Porter stemmer shifts)
         },
     });
     sqlite.addCSourceFile(.{
@@ -33,6 +34,7 @@ pub fn build(b: *std.Build) void {
             "-DSQLITE_VEC_ENABLE_DISKANN=0",
             "-DSQLITE_VEC_EXPERIMENTAL_IVF_ENABLE=0",
             "-Wno-pointer-bool-conversion",
+            "-fno-sanitize=undefined", // sqlite-vec has similar patterns
         },
     });
 

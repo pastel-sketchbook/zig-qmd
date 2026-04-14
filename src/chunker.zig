@@ -1,21 +1,11 @@
 const std = @import("std");
 
+/// Target chunk size in characters for document splitting.
 pub const CHUNK_SIZE_CHARS = 3600;
+/// Number of overlapping characters between adjacent chunks.
 pub const CHUNK_OVERLAP_CHARS = 540;
+/// Window size in characters for scanning best break-point candidates.
 pub const CHUNK_WINDOW_CHARS = 800;
-
-const BREAK_PATTERNS = [_][:0]const u8{
-    "\n## ",
-    "\n### ",
-    "\n#### ",
-    "\n##### ",
-    "\n###### ",
-    "\n# ",
-    "\n## ",
-    "\n### ",
-    "\n#### ",
-    "\n##### ",
-};
 
 const CodeFence = struct {
     start: usize,
@@ -23,6 +13,8 @@ const CodeFence = struct {
     lang: []const u8,
 };
 
+/// Scans content for triple-backtick fenced code blocks, returning their byte ranges
+/// and detected language tag.
 pub fn findCodeFences(content: []const u8, allocator: std.mem.Allocator) !struct { fences: std.ArrayList(CodeFence) } {
     var fences = try std.ArrayList(CodeFence).initCapacity(allocator, 0);
     var i: usize = 0;
@@ -56,6 +48,8 @@ pub fn findCodeFences(content: []const u8, allocator: std.mem.Allocator) !struct
     return .{ .fences = fences };
 }
 
+/// Finds the optimal chunk boundary within a window by scoring newlines for
+/// proximity to center and heading presence.
 pub fn findBestCutoff(content: []const u8, window_start: usize, window_end: usize) usize {
     if (window_end <= window_start) return window_start;
     if (window_end - window_start < 20) return window_end;
@@ -91,6 +85,8 @@ pub fn findBestCutoff(content: []const u8, window_start: usize, window_end: usiz
     return best_pos;
 }
 
+/// Splits a document into overlapping chunks of approximately `CHUNK_SIZE_CHARS`,
+/// using `findBestCutoff` to find natural break points.
 pub fn chunkDocument(content: []const u8, allocator: std.mem.Allocator) !struct { chunks: std.ArrayList([]const u8) } {
     var chunks = try std.ArrayList([]const u8).initCapacity(allocator, 0);
 

@@ -2,6 +2,7 @@ const std = @import("std");
 const ChildProcess = std.process.Child;
 const db = @import("db.zig");
 
+/// Error set for llama.cpp integration operations.
 pub const LlamaError = error{
     InitFailed,
     LoadFailed,
@@ -16,6 +17,7 @@ pub const LlamaError = error{
     SpawnFailed,
 };
 
+/// FNV-hash-based fallback embedding engine used when no real model is available.
 pub const LlamaCpp = struct {
     model_path: []const u8,
     embedding_dim: usize = 384,
@@ -23,6 +25,7 @@ pub const LlamaCpp = struct {
     temp_dir: ?std.fs.Dir = null,
     pid: ?ChildProcess.Id = null,
 
+    /// Creates a LlamaCpp instance, checking if the model file exists.
     pub fn init(model_path: []const u8, _: std.mem.Allocator) LlamaError!LlamaCpp {
         var self = LlamaCpp{
             .model_path = model_path,
@@ -43,6 +46,7 @@ pub const LlamaCpp = struct {
         return self;
     }
 
+    /// Releases resources held by the LlamaCpp instance.
     pub fn deinit(self: *LlamaCpp) void {
         if (self.temp_dir) |*dir| {
             dir.close();
@@ -50,6 +54,7 @@ pub const LlamaCpp = struct {
         self.loaded = false;
     }
 
+    /// Generates a deterministic FNV-hash embedding for the given text.
     pub fn embed(self: *LlamaCpp, text: []const u8, allocator: std.mem.Allocator) LlamaError![]f32 {
         // Use FNV hash as fallback embedding when no model is loaded
         const embedding = allocator.alloc(f32, self.embedding_dim) catch return LlamaError.EmbedFailed;
@@ -71,6 +76,7 @@ pub const LlamaCpp = struct {
         return embedding;
     }
 
+    /// Generates embeddings for multiple texts.
     pub fn embedBatch(self: *LlamaCpp, texts: [][]const u8, allocator: std.mem.Allocator) LlamaError![][]f32 {
         var embeddings = try allocator.alloc([]f32, texts.len);
         errdefer for (embeddings) |emb| allocator.free(emb);
@@ -80,26 +86,31 @@ pub const LlamaCpp = struct {
         return embeddings;
     }
 
+    /// Returns the embedding dimensionality.
     pub fn embedDim(self: *const LlamaCpp) usize {
         return self.embedding_dim;
     }
 
+    /// Returns whether a real model file was found.
     pub fn isLoaded(self: *const LlamaCpp) bool {
         return self.loaded;
     }
 };
 
+/// Role in a chat conversation (system, user, assistant).
 pub const ChatRole = enum {
     system,
     user,
     assistant,
 };
 
+/// A single message in a chat conversation.
 pub const ChatMessage = struct {
     role: ChatRole,
     content: []u8,
 };
 
+/// Multi-turn chat session backed by a llama.cpp generation subprocess.
 pub const LlamaChatSession = struct {
     allocator: std.mem.Allocator,
     binary_path: []u8,
@@ -107,6 +118,7 @@ pub const LlamaChatSession = struct {
     history: std.ArrayList(ChatMessage),
     max_history: usize = 12,
 
+    /// Creates a new chat session with paths to binary and model.
     pub fn init(allocator: std.mem.Allocator, binary_path: []const u8, model_path: []const u8) !LlamaChatSession {
         return .{
             .allocator = allocator,
@@ -116,6 +128,7 @@ pub const LlamaChatSession = struct {
         };
     }
 
+    /// Frees all resources and message history.
     pub fn deinit(self: *LlamaChatSession) void {
         for (self.history.items) |msg| self.allocator.free(msg.content);
         self.history.deinit(self.allocator);
@@ -123,10 +136,12 @@ pub const LlamaChatSession = struct {
         self.allocator.free(self.model_path);
     }
 
+    /// Adds a system prompt to the conversation history.
     pub fn addSystemPrompt(self: *LlamaChatSession, prompt: []const u8) !void {
         try self.appendMessage(.system, prompt);
     }
 
+    /// Sends a user message and returns the model's response.
     pub fn send(self: *LlamaChatSession, user_input: []const u8) ![]u8 {
         try self.appendMessage(.user, user_input);
 
@@ -167,6 +182,7 @@ pub const LlamaChatSession = struct {
     }
 };
 
+/// Scores passages for relevance to a query using generation or lexical fallback.
 pub fn rerankPassages(
     allocator: std.mem.Allocator,
     query: []const u8,
@@ -278,8 +294,10 @@ fn containsAsciiCaseInsensitive(haystack: []const u8, needle: []const u8) bool {
     return false;
 }
 
+/// Maximum text length (in bytes) for embedding input.
 pub const EMBEDDING_MAX_TEXT_LEN: usize = 2048;
 
+/// Formats text for embedding with appropriate query/document prefix.
 pub fn formatTextForEmbedding(allocator: std.mem.Allocator, text: []const u8, is_query: bool) ![]u8 {
     if (is_query) {
         return formatQueryForEmbedding(allocator, text);
@@ -287,6 +305,7 @@ pub fn formatTextForEmbedding(allocator: std.mem.Allocator, text: []const u8, is
     return formatDocForEmbedding(allocator, text);
 }
 
+/// Normalizes and prefixes text with "query: " for embedding.
 pub fn formatQueryForEmbedding(allocator: std.mem.Allocator, query: []const u8) ![]u8 {
     const normalized = try normalizeEmbeddingText(allocator, query, EMBEDDING_MAX_TEXT_LEN);
     defer allocator.free(normalized);
@@ -298,6 +317,7 @@ pub fn formatQueryForEmbedding(allocator: std.mem.Allocator, query: []const u8) 
     return out.toOwnedSlice(allocator);
 }
 
+/// Normalizes and prefixes text with "passage: " for embedding.
 pub fn formatDocForEmbedding(allocator: std.mem.Allocator, doc: []const u8) ![]u8 {
     const normalized = try normalizeEmbeddingText(allocator, doc, EMBEDDING_MAX_TEXT_LEN);
     defer allocator.free(normalized);
@@ -337,6 +357,7 @@ fn normalizeEmbeddingText(allocator: std.mem.Allocator, text: []const u8, max_le
     return out.toOwnedSlice(allocator);
 }
 
+/// Computes cosine similarity between two float vectors.
 pub fn cosineSimilarity(a: []const f32, b: []const f32) f32 {
     if (a.len != b.len) return 0;
     var dot: f32 = 0;
@@ -351,6 +372,7 @@ pub fn cosineSimilarity(a: []const f32, b: []const f32) f32 {
     return dot / (@sqrt(norm_a) * @sqrt(norm_b));
 }
 
+/// Computes Euclidean distance between two float vectors.
 pub fn euclideanDistance(a: []const f32, b: []const f32) f32 {
     if (a.len != b.len) return 0;
     var dist: f32 = 0;
@@ -361,6 +383,7 @@ pub fn euclideanDistance(a: []const f32, b: []const f32) f32 {
     return @sqrt(dist);
 }
 
+/// Computes dot product of two float vectors.
 pub fn dotProduct(a: []const f32, b: []const f32) f32 {
     if (a.len != b.len) return 0;
     var sum: f32 = 0;
@@ -368,29 +391,35 @@ pub fn dotProduct(a: []const f32, b: []const f32) f32 {
     return sum;
 }
 
+/// In-memory key-value cache for LLM results.
 pub const LlmCache = struct {
     allocator: std.mem.Allocator,
     entries: std.StringHashMap(CachedResult),
 
+    /// Creates a new empty LLM cache.
     pub fn init(allocator: std.mem.Allocator) LlmCache {
         return .{ .allocator = allocator, .entries = std.StringHashMap(CachedResult).init(allocator) };
     }
 
+    /// Frees all cache entries and keys.
     pub fn deinit(self: *LlmCache) void {
         var it = self.entries.iterator();
         while (it.next()) |entry| self.allocator.free(entry.key_ptr.*);
         self.entries.deinit();
     }
 
+    /// Looks up a cached result by key.
     pub fn get(self: *const LlmCache, key: []const u8) ?CachedResult {
         return self.entries.get(key);
     }
 
+    /// Stores a result in the cache.
     pub fn put(self: *LlmCache, key: []const u8, value: CachedResult) !void {
         const key_copy = try self.allocator.dupe(u8, key);
         try self.entries.put(key_copy, value);
     }
 
+    /// Removes all entries from the cache.
     pub fn clear(self: *LlmCache) void {
         var it = self.entries.iterator();
         while (it.next()) |entry| self.allocator.free(entry.key_ptr.*);
@@ -398,15 +427,18 @@ pub const LlmCache = struct {
     }
 };
 
+/// A cached LLM result with creation timestamp.
 pub const CachedResult = struct {
     response: []const u8,
     created_at: i64,
 };
 
+/// Error set for cache operations.
 pub const CacheError = error{
     OutOfMemory,
 } || db.DbError;
 
+/// Builds a deterministic SHA-256 cache key from kind, model, and input.
 pub fn buildCacheKey(kind: []const u8, model: []const u8, input: []const u8) [64]u8 {
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     hasher.update(kind);
@@ -426,6 +458,7 @@ pub fn buildCacheKey(kind: []const u8, model: []const u8, input: []const u8) [64
     return out;
 }
 
+/// Retrieves a cached result from the SQLite llm_cache table.
 pub fn cacheGet(db_: *db.Db, key: []const u8, allocator: std.mem.Allocator) CacheError!?[]u8 {
     var stmt = try db_.prepare("SELECT result FROM llm_cache WHERE hash = ?");
     defer stmt.finalize();
@@ -436,6 +469,7 @@ pub fn cacheGet(db_: *db.Db, key: []const u8, allocator: std.mem.Allocator) Cach
     return allocator.dupe(u8, std.mem.span(text)) catch return CacheError.OutOfMemory;
 }
 
+/// Stores a result in the SQLite llm_cache table.
 pub fn cachePut(db_: *db.Db, key: []const u8, value: []const u8) CacheError!void {
     var stmt = try db_.prepare("INSERT OR REPLACE INTO llm_cache(hash, result, created_at) VALUES(?, ?, ?)");
     defer stmt.finalize();
@@ -445,20 +479,24 @@ pub fn cachePut(db_: *db.Db, key: []const u8, value: []const u8) CacheError!void
     _ = try stmt.step();
 }
 
+/// Minimal search result with id and score for reranking.
 pub const SimpleResult = struct {
     id: i64,
     score: f64,
 };
 
+/// Placeholder reranking function (currently returns results unchanged).
 pub fn rerank(results: []const SimpleResult, query: []const u8) ![]SimpleResult {
     _ = query;
     return results;
 }
 
+/// Expands a search query with related terms using a model or heuristic fallback.
 pub fn expandQuery(allocator: std.mem.Allocator, query: []const u8) ![]const u8 {
     return expandQueryWithModel(allocator, query, null, null) catch expandQueryHeuristic(allocator, query);
 }
 
+/// Expands a query using a llama.cpp generation subprocess or heuristic fallback.
 pub fn expandQueryWithModel(
     allocator: std.mem.Allocator,
     query: []const u8,
@@ -599,6 +637,7 @@ test "LlmCache stores and retrieves" {
 // LlamaEmbedding - Subprocess-based embedding engine
 // =============================================================================
 
+/// Error set for subprocess-based embedding operations.
 pub const EmbeddingError = error{
     BinaryNotFound,
     ModelNotFound,
@@ -611,17 +650,20 @@ pub const EmbeddingError = error{
     Timeout,
 };
 
+/// Where a model is located: local file, HuggingFace repo, or URL.
 pub const ModelSource = enum {
     local,
     huggingface,
     url,
 };
 
+/// Parsed model specification with source type and path/URL.
 pub const ModelSpec = struct {
     source: ModelSource,
     value: []const u8,
 };
 
+/// Parses a model path string into a ModelSpec (hf://, http://, or local).
 pub fn parseModelSpec(model_path: []const u8) EmbeddingError!ModelSpec {
     if (model_path.len == 0) return EmbeddingError.InvalidModelSpec;
 
@@ -637,6 +679,7 @@ pub fn parseModelSpec(model_path: []const u8) EmbeddingError!ModelSpec {
     return .{ .source = .local, .value = model_path };
 }
 
+/// Validates that a local model file exists on disk.
 pub fn validateModelPath(model_path: []const u8) EmbeddingError!void {
     const model_spec = try parseModelSpec(model_path);
     if (model_spec.source == .local) {
@@ -681,6 +724,7 @@ pub const LlamaEmbedding = struct {
         };
     }
 
+    /// Frees binary and model path strings.
     pub fn deinit(self: *Self) void {
         self.allocator.free(self.binary_path);
         self.allocator.free(self.model_path);

@@ -283,6 +283,10 @@ pub fn main() !void {
         defer qmd.config.freeCollections(&collections_result);
 
         var total_indexed: usize = 0;
+
+        // Wrap all inserts in a single transaction for performance
+        db_.exec("BEGIN") catch {};
+
         for (collections_result.collections.items) |col| {
             try stdout.print("Indexing collection '{s}' from {s}...\n", .{ col.name, col.path });
             try stdout.flush();
@@ -383,6 +387,8 @@ pub fn main() !void {
             }
             try stdout.print("  Indexed {d} documents\n", .{total_indexed});
         }
+
+        db_.exec("COMMIT") catch {};
 
         try stdout.print("Update complete. Total: {d} documents\n", .{total_indexed});
         try stdout.flush();
@@ -1026,7 +1032,7 @@ pub fn main() !void {
     if (std.mem.eql(u8, cmd, "mcp")) {
         try stdout.writeAll("Starting MCP server...\n");
         try stdout.flush();
-        try qmd.mcp.McpServer.run();
+        try qmd.mcp.McpServer.run(allocator);
         return;
     }
 
