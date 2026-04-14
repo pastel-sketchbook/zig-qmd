@@ -125,7 +125,7 @@ const RankedEntry = struct {
 pub fn reciprocalRankFusion(
     result_lists: []const []const ScoredResult,
     k: f64,
-) []ScoredResult {
+) ![]ScoredResult {
     var seen = std.AutoHashMap(i64, RankedEntry).init(std.heap.page_allocator);
     defer seen.deinit();
 
@@ -134,21 +134,21 @@ pub fn reciprocalRankFusion(
             const rrf_score = 1.0 / (k + @as(f64, @floatFromInt(rank + 1)));
             const key = result.id;
             if (seen.get(key)) |existing| {
-                seen.put(key, .{ .score = existing.score + rrf_score, .result = existing.result }) catch {};
+                try seen.put(key, .{ .score = existing.score + rrf_score, .result = existing.result });
             } else {
-                seen.put(key, .{ .score = rrf_score, .result = result }) catch {};
+                try seen.put(key, .{ .score = rrf_score, .result = result });
             }
         }
     }
 
-    var ranked = std.ArrayList(ScoredResult).initCapacity(std.heap.page_allocator, 0) catch return &.{};
+    var ranked = try std.ArrayList(ScoredResult).initCapacity(std.heap.page_allocator, 0);
     errdefer ranked.deinit(std.heap.page_allocator);
-    var entries = std.ArrayList(struct { key: i64, score: f64, result: ScoredResult }).initCapacity(std.heap.page_allocator, 0) catch return &.{};
+    var entries = try std.ArrayList(struct { key: i64, score: f64, result: ScoredResult }).initCapacity(std.heap.page_allocator, 0);
     errdefer entries.deinit(std.heap.page_allocator);
 
     var it = seen.iterator();
     while (it.next()) |entry| {
-        entries.append(std.heap.page_allocator, .{ .key = entry.key_ptr.*, .score = entry.value_ptr.score, .result = entry.value_ptr.result }) catch {};
+        try entries.append(std.heap.page_allocator, .{ .key = entry.key_ptr.*, .score = entry.value_ptr.score, .result = entry.value_ptr.result });
     }
 
     std.sort.heap(@TypeOf(entries.items[0]), entries.items, {}, struct {
@@ -158,7 +158,7 @@ pub fn reciprocalRankFusion(
     }.less);
 
     for (entries.items) |entry| {
-        ranked.append(std.heap.page_allocator, entry.result) catch {};
+        try ranked.append(std.heap.page_allocator, entry.result);
     }
 
     return ranked.items;
@@ -238,7 +238,7 @@ pub fn hybridSearch(
     lists[0] = fts_scored.items;
     lists[1] = vec_scored;
 
-    var fused = reciprocalRankFusion(&lists, options.rrf_k);
+    var fused = try reciprocalRankFusion(&lists, options.rrf_k);
 
     if (options.enable_rerank and fused.len > 1) {
         if (is_aborted(options.abort_signal)) {
@@ -396,16 +396,16 @@ pub fn searchVec(
         const ttl = stmt.columnText(4);
         const emb = stmt.columnText(5);
 
+        const col_span = if (coll) |c| std.mem.span(c) else "";
+        if (collection) |wanted| {
+            if (!std.mem.eql(u8, col_span, wanted)) continue;
+        }
+        if (emb == null) continue;
+
         const hash = if (hsh) |h| try std.heap.page_allocator.dupe(u8, std.mem.span(h)) else try std.heap.page_allocator.dupe(u8, "");
-        const col = if (coll) |c| try std.heap.page_allocator.dupe(u8, std.mem.span(c)) else try std.heap.page_allocator.dupe(u8, "");
+        const col = try std.heap.page_allocator.dupe(u8, col_span);
         const path = if (pth) |p| try std.heap.page_allocator.dupe(u8, std.mem.span(p)) else try std.heap.page_allocator.dupe(u8, "");
         const title = if (ttl) |t| try std.heap.page_allocator.dupe(u8, std.mem.span(t)) else try std.heap.page_allocator.dupe(u8, "");
-
-        if (collection != null and !std.mem.eql(u8, col, collection.?)) {
-            continue;
-        }
-
-        if (emb == null) continue;
 
         const doc_embedding = parse_embedding_json_array(std.mem.span(emb.?)) catch continue;
         defer std.heap.page_allocator.free(doc_embedding);
@@ -467,12 +467,15 @@ fn searchVecNative(db_: *db.Db, query_embedding: []const f32, collection: ?[]con
         const ttl = stmt.columnText(4);
         const dist = stmt.columnDouble(5);
 
+        const col_span = if (coll) |c| std.mem.span(c) else "";
+        if (collection) |wanted| {
+            if (!std.mem.eql(u8, col_span, wanted)) continue;
+        }
+
         const hash = if (hsh) |h| try std.heap.page_allocator.dupe(u8, std.mem.span(h)) else try std.heap.page_allocator.dupe(u8, "");
-        const col = if (coll) |c| try std.heap.page_allocator.dupe(u8, std.mem.span(c)) else try std.heap.page_allocator.dupe(u8, "");
+        const col = try std.heap.page_allocator.dupe(u8, col_span);
         const path = if (pth) |p| try std.heap.page_allocator.dupe(u8, std.mem.span(p)) else try std.heap.page_allocator.dupe(u8, "");
         const title = if (ttl) |t| try std.heap.page_allocator.dupe(u8, std.mem.span(t)) else try std.heap.page_allocator.dupe(u8, "");
-
-        if (collection != null and !std.mem.eql(u8, col, collection.?)) continue;
 
         const score = 1.0 / (1.0 + dist);
         const candidate = ScoredResult{ .id = id, .collection = col, .path = path, .title = title, .hash = hash, .score = score };
@@ -589,7 +592,7 @@ test "reciprocalRankFusion merges results" {
         .{ .id = 3, .collection = "a", .path = "c", .title = "C", .hash = "", .score = 0.6 },
     };
 
-    const fused = reciprocalRankFusion(&.{ list1, list2 }, RRF_K);
+    const fused = try reciprocalRankFusion(&.{ list1, list2 }, RRF_K);
 
     try std.testing.expect(fused.len > 0);
     var seen2 = false;
