@@ -91,7 +91,9 @@ pub const McpServer = struct {
         }
         if (std.mem.eql(u8, method, "tools/call")) {
             const params = extractParams(request) catch return McpError.InvalidParams;
-            return try formatResponse(id, try callToolAtPath(params, db_path_override orelse DB_PATH));
+            const tool_name = extractParam(params, "name") orelse return McpError.InvalidParams;
+            const args_obj = extractObjectParam(params, "arguments") orelse params;
+            return try formatResponse(id, try callToolNamedAtPath(tool_name, args_obj, db_path_override orelse DB_PATH));
         }
         if (std.mem.eql(u8, method, "initialize")) {
             return try formatResponse(id, getServerInfo());
@@ -150,16 +152,16 @@ pub const McpServer = struct {
     }
 
     fn listTools() []const u8 {
-        return "{\"tools\":[{\"name\":\"query\",\"description\":\"Hybrid search\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}}}},{\"name\":\"search\",\"description\":\"FTS search\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"collection\":{\"type\":\"string\"}}}},{\"name\":\"get\",\"description\":\"Get document\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}}}},{\"name\":\"status\",\"description\":\"System status\",\"inputSchema\":{\"type\":\"object\"}}]}";
+        return "{\"tools\":[{\"name\":\"query\",\"description\":\"Hybrid search\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"arguments\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}}}}}},{\"name\":\"search\",\"description\":\"FTS search\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"arguments\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"collection\":{\"type\":\"string\"}}}}}},{\"name\":\"get\",\"description\":\"Get document\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"arguments\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}}}}}},{\"name\":\"status\",\"description\":\"System status\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"arguments\":{\"type\":\"object\"}}}}]}";
     }
 
     fn callTool(params: []const u8) ![]u8 {
-        return callToolAtPath(params, DB_PATH);
+        const tool_name = extractParam(params, "name") orelse return McpError.InvalidParams;
+        const args_obj = extractObjectParam(params, "arguments") orelse params;
+        return callToolNamedAtPath(tool_name, args_obj, DB_PATH);
     }
 
-    fn callToolAtPath(params: []const u8, db_path_raw: []const u8) ![]u8 {
-        const name = extractParam(params, "name") orelse return McpError.InvalidParams;
-
+    fn callToolNamedAtPath(name: []const u8, args_json: []const u8, db_path_raw: []const u8) ![]u8 {
         const db_path = std.heap.page_allocator.dupeZ(u8, db_path_raw) catch return McpError.InvalidParams;
         defer std.heap.page_allocator.free(db_path);
 
@@ -169,7 +171,7 @@ pub const McpServer = struct {
         defer db_.close();
 
         if (std.mem.eql(u8, name, "query")) {
-            const query_text = extractParam(params, "query") orelse "";
+            const query_text = extractParam(args_json, "query") orelse "";
             var result = search.hybridSearch(&db_, query_text, null, .{
                 .enable_vector = true,
                 .max_results = 5,
@@ -185,8 +187,8 @@ pub const McpServer = struct {
             return std.fmt.allocPrint(std.heap.page_allocator, "{{\"content\":[{{\"type\":\"text\",\"text\":\"{s}\"}}]}}", .{text.items}) catch McpError.InvalidParams;
         }
         if (std.mem.eql(u8, name, "search")) {
-            const query_text = extractParam(params, "query") orelse "";
-            const collection = extractParam(params, "collection");
+            const query_text = extractParam(args_json, "query") orelse "";
+            const collection = extractParam(args_json, "collection");
             var result = search.searchFTS(&db_, query_text, collection) catch return std.heap.page_allocator.dupe(u8, "{\"content\":[{\"type\":\"text\",\"text\":\"search failed\"}]}") catch McpError.InvalidParams;
             defer result.results.deinit(std.heap.page_allocator);
 
@@ -211,7 +213,7 @@ pub const McpServer = struct {
             return std.fmt.allocPrint(std.heap.page_allocator, "{{\"content\":[{{\"type\":\"text\",\"text\":\"{s}\"}}]}}", .{text}) catch McpError.InvalidParams;
         }
         if (std.mem.eql(u8, name, "get")) {
-            const raw_path = extractParam(params, "path") orelse return McpError.InvalidParams;
+            const raw_path = extractParam(args_json, "path") orelse return McpError.InvalidParams;
             const parsed = root.parse_virtual_path(raw_path) orelse return McpError.InvalidParams;
             const doc = store.findActiveDocument(&db_, parsed.collection, parsed.path) catch {
                 return std.heap.page_allocator.dupe(u8, "{\"content\":[{\"type\":\"text\",\"text\":\"document not found\"}]}") catch McpError.InvalidParams;
@@ -231,7 +233,7 @@ pub const McpServer = struct {
     }
 
     fn getServerInfo() []const u8 {
-        return "{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"zmd\",\"version\":\"0.1.0\"}}";
+        return "{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{\"listChanged\":false}},\"serverInfo\":{\"name\":\"zmd\",\"version\":\"0.1.0\"}}";
     }
 
     fn extractParam(json: []const u8, key: []const u8) ?[]const u8 {
@@ -241,6 +243,26 @@ pub const McpServer = struct {
         const start = key_start + pattern.len;
         const end = std.mem.indexOfScalarPos(u8, json, start, '"') orelse return null;
         return json[start..end];
+    }
+
+    fn extractObjectParam(json: []const u8, key: []const u8) ?[]const u8 {
+        const pattern = std.fmt.allocPrint(std.heap.page_allocator, "\"{s}\":", .{key}) catch return null;
+        defer std.heap.page_allocator.free(pattern);
+        const key_start = std.mem.indexOf(u8, json, pattern) orelse return null;
+        var start = key_start + pattern.len;
+        while (start < json.len and (json[start] == ' ' or json[start] == '\n' or json[start] == '\t' or json[start] == '\r')) : (start += 1) {}
+        if (start >= json.len or json[start] != '{') return null;
+
+        var depth: i32 = 0;
+        var i = start;
+        while (i < json.len) : (i += 1) {
+            if (json[i] == '{') depth += 1;
+            if (json[i] == '}') {
+                depth -= 1;
+                if (depth == 0) return json[start .. i + 1];
+            }
+        }
+        return null;
     }
 
     fn formatResponse(id: []const u8, result: []const u8) ![]u8 {
@@ -487,4 +509,16 @@ test "framed tools/call get returns document content" {
     defer allocator.free(resp);
     try std.testing.expect(std.mem.indexOf(u8, resp, "Title: Alpha") != null);
     try std.testing.expect(std.mem.indexOf(u8, resp, "hello world") != null);
+}
+
+test "framed tools/call supports MCP arguments object" {
+    const allocator = std.testing.allocator;
+    const db_path = try setupMcpTestDb(allocator);
+    defer cleanupMcpTestDb(db_path);
+    defer allocator.free(db_path);
+
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{\"name\":\"search\",\"arguments\":{\"query\":\"hello\",\"collection\":\"wiki\"}}}";
+    const resp = try processFramedRequestForTest(req, db_path, allocator);
+    defer allocator.free(resp);
+    try std.testing.expect(std.mem.indexOf(u8, resp, "fts results") != null);
 }
