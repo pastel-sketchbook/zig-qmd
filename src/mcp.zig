@@ -13,6 +13,32 @@ pub const McpError = error{
     InvalidParams,
 };
 
+const ParsedRequest = struct {
+    id_json: []u8,
+    method: []u8,
+    params_json: ?[]u8,
+
+    fn deinit(self: *ParsedRequest, allocator: std.mem.Allocator) void {
+        allocator.free(self.id_json);
+        allocator.free(self.method);
+        if (self.params_json) |params| allocator.free(params);
+    }
+};
+
+const ParsedToolCall = struct {
+    name: []u8,
+    query: ?[]u8,
+    collection: ?[]u8,
+    path: ?[]u8,
+
+    fn deinit(self: *ParsedToolCall, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+        if (self.query) |value| allocator.free(value);
+        if (self.collection) |value| allocator.free(value);
+        if (self.path) |value| allocator.free(value);
+    }
+};
+
 pub const McpServer = struct {
     pub fn run() !void {
         const allocator = std.heap.page_allocator;
@@ -29,7 +55,7 @@ pub const McpServer = struct {
             const msg = readMessage(stdin, allocator) catch break;
             defer allocator.free(msg);
 
-            const response = handleRequestWithDbPath(msg, null) catch |err| {
+            const response = handleRequestWithDbPath(msg, null, allocator) catch |err| {
                 const err_json = std.fmt.allocPrint(
                     allocator,
                     "{{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{{\"code\":-32600,\"message\":\"{s}\"}}}}",
@@ -75,202 +101,196 @@ pub const McpServer = struct {
         try stdout.flush();
     }
 
-    fn handleRequest(request: []const u8) ![]u8 {
-        return handleRequestWithDbPath(request, null);
+    fn handleRequest(request: []const u8, allocator: std.mem.Allocator) ![]u8 {
+        return handleRequestWithDbPath(request, null, allocator);
     }
 
-    fn handleRequestWithDbPath(request: []const u8, db_path_override: ?[]const u8) ![]u8 {
-        const version = extractJsonRpc(request) orelse return McpError.ParseError;
-        if (!std.mem.eql(u8, version, "2.0")) return McpError.ParseError;
+    fn handleRequestWithDbPath(request: []const u8, db_path_override: ?[]const u8, allocator: std.mem.Allocator) ![]u8 {
+        var parsed = try parseRequest(request, allocator);
+        defer parsed.deinit(allocator);
 
-        const id = extractId(request) orelse return McpError.ParseError;
-        const method = extractMethod(request) orelse return McpError.ParseError;
-
-        if (std.mem.eql(u8, method, "tools/list")) {
-            return try formatResponse(id, listTools());
+        if (std.mem.eql(u8, parsed.method, "tools/list")) {
+            return try formatResponse(parsed.id_json, listTools(), allocator);
         }
-        if (std.mem.eql(u8, method, "tools/call")) {
-            const params = extractParams(request) catch return McpError.InvalidParams;
-            const tool_name = extractParam(params, "name") orelse return McpError.InvalidParams;
-            const args_obj = extractObjectParam(params, "arguments") orelse params;
-            return try formatResponse(id, try callToolNamedAtPath(tool_name, args_obj, db_path_override orelse DB_PATH));
+        if (std.mem.eql(u8, parsed.method, "tools/call")) {
+            const params = parsed.params_json orelse return McpError.InvalidParams;
+            var tool_call = try parseToolCall(params, allocator);
+            defer tool_call.deinit(allocator);
+            return try formatResponse(parsed.id_json, try callToolNamedAtPath(&tool_call, db_path_override orelse DB_PATH, allocator), allocator);
         }
-        if (std.mem.eql(u8, method, "initialize")) {
-            return try formatResponse(id, getServerInfo());
+        if (std.mem.eql(u8, parsed.method, "initialize")) {
+            return try formatResponse(parsed.id_json, getServerInfo(), allocator);
         }
-        if (std.mem.eql(u8, method, "ping")) {
-            return try formatResponse(id, "pong");
+        if (std.mem.eql(u8, parsed.method, "ping")) {
+            return try formatResponse(parsed.id_json, "pong", allocator);
         }
-        return try formatError(id, "method not found");
+        return try formatError(parsed.id_json, "method not found", allocator);
     }
 
-    fn extractJsonRpc(request: []const u8) ?[]const u8 {
-        const start_key = std.mem.indexOf(u8, request, "\"jsonrpc\":\"") orelse return null;
-        const start = start_key + 11;
-        const end = std.mem.indexOfScalarPos(u8, request, start, '"') orelse return null;
-        return request[start..end];
-    }
+    fn parseRequest(request: []const u8, allocator: std.mem.Allocator) !ParsedRequest {
+        const parsed = std.json.parseFromSlice(std.json.Value, allocator, request, .{}) catch return McpError.ParseError;
+        defer parsed.deinit();
 
-    fn extractId(request: []const u8) ?[]const u8 {
-        const id_start = std.mem.indexOf(u8, request, "\"id\":") orelse return null;
-        const start = id_start + 5;
-        if (start >= request.len) return null;
-        if (request[start] == '"') {
-            const end = std.mem.indexOfScalarPos(u8, request, start + 1, '"') orelse return null;
-            return request[start + 1 .. end];
-        } else {
-            const end = std.mem.indexOfAny(u8, request[start..], ",}") orelse return null;
-            return request[start .. start + end];
+        if (parsed.value != .object) return McpError.ParseError;
+        const obj = parsed.value.object;
+
+        const version_value = obj.get("jsonrpc") orelse return McpError.ParseError;
+        if (version_value != .string or !std.mem.eql(u8, version_value.string, "2.0")) {
+            return McpError.ParseError;
         }
+
+        const id_value = obj.get("id") orelse return McpError.ParseError;
+        const method_value = obj.get("method") orelse return McpError.ParseError;
+        if (method_value != .string) return McpError.ParseError;
+
+        const id_json = try stringifyJsonValue(allocator, id_value);
+        errdefer allocator.free(id_json);
+        const method = try allocator.dupe(u8, method_value.string);
+        errdefer allocator.free(method);
+
+        const params_json = if (obj.get("params")) |params_value|
+            try stringifyJsonValue(allocator, params_value)
+        else
+            null;
+        errdefer if (params_json) |params| allocator.free(params);
+
+        return .{ .id_json = id_json, .method = method, .params_json = params_json };
     }
 
-    fn extractMethod(request: []const u8) ?[]const u8 {
-        const method_start = std.mem.indexOf(u8, request, "\"method\":") orelse return null;
-        const start = method_start + 10;
-        if (start >= request.len or request[start] != '"') return null;
-        const end = std.mem.indexOfScalarPos(u8, request, start + 1, '"') orelse return null;
-        return request[start + 1 .. end];
-    }
-
-    fn extractParams(request: []const u8) ![]const u8 {
-        const params_start = std.mem.indexOf(u8, request, "\"params\":") orelse return McpError.InvalidParams;
-        var start = params_start + 9;
-        while (start < request.len and request[start] != '{') start += 1;
-        if (start >= request.len) return McpError.InvalidParams;
-        var depth: i32 = 0;
-        var i = start;
-        while (i < request.len) : (i += 1) {
-            if (request[i] == '{') depth += 1;
-            if (request[i] == '}') {
-                depth -= 1;
-                if (depth == 0) {
-                    return request[start .. i + 1];
-                }
-            }
-        }
-        return McpError.InvalidParams;
+    fn stringifyJsonValue(allocator: std.mem.Allocator, value: std.json.Value) ![]u8 {
+        var out: std.Io.Writer.Allocating = .init(allocator);
+        defer out.deinit();
+        try std.json.Stringify.value(value, .{}, &out.writer);
+        return try allocator.dupe(u8, out.written());
     }
 
     fn listTools() []const u8 {
         return "{\"tools\":[{\"name\":\"query\",\"description\":\"Hybrid search\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"arguments\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}}}}}},{\"name\":\"search\",\"description\":\"FTS search\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"arguments\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"collection\":{\"type\":\"string\"}}}}}},{\"name\":\"get\",\"description\":\"Get document\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"arguments\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}}}}}},{\"name\":\"status\",\"description\":\"System status\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"arguments\":{\"type\":\"object\"}}}}]}";
     }
 
-    fn callTool(params: []const u8) ![]u8 {
-        const tool_name = extractParam(params, "name") orelse return McpError.InvalidParams;
-        const args_obj = extractObjectParam(params, "arguments") orelse params;
-        return callToolNamedAtPath(tool_name, args_obj, DB_PATH);
+    fn callTool(params: []const u8, allocator: std.mem.Allocator) ![]u8 {
+        var tool_call = try parseToolCall(params, allocator);
+        defer tool_call.deinit(allocator);
+        return callToolNamedAtPath(&tool_call, DB_PATH, allocator);
     }
 
-    fn callToolNamedAtPath(name: []const u8, args_json: []const u8, db_path_raw: []const u8) ![]u8 {
-        const db_path = std.heap.page_allocator.dupeZ(u8, db_path_raw) catch return McpError.InvalidParams;
-        defer std.heap.page_allocator.free(db_path);
+    fn callToolNamedAtPath(tool_call: *const ParsedToolCall, db_path_raw: []const u8, allocator: std.mem.Allocator) ![]u8 {
+        const db_path = allocator.dupeZ(u8, db_path_raw) catch return McpError.InvalidParams;
+        defer allocator.free(db_path);
 
         var db_ = db.Db.open(db_path) catch {
-            return std.heap.page_allocator.dupe(u8, "{\"content\":[{\"type\":\"text\",\"text\":\"database not initialized\"}]}") catch McpError.InvalidParams;
+            return allocator.dupe(u8, "{\"content\":[{\"type\":\"text\",\"text\":\"database not initialized\"}]}") catch McpError.InvalidParams;
         };
         defer db_.close();
 
-        if (std.mem.eql(u8, name, "query")) {
-            const query_text = extractParam(args_json, "query") orelse "";
-            var result = search.hybridSearch(&db_, std.heap.page_allocator, query_text, null, .{
+        if (std.mem.eql(u8, tool_call.name, "query")) {
+            const query_text = tool_call.query orelse "";
+            var result = search.hybridSearch(&db_, allocator, query_text, null, .{
                 .enable_vector = true,
                 .max_results = 5,
-            }) catch return std.heap.page_allocator.dupe(u8, "{\"content\":[{\"type\":\"text\",\"text\":\"query failed\"}]}") catch McpError.InvalidParams;
-            defer result.deinit(std.heap.page_allocator);
+            }) catch return allocator.dupe(u8, "{\"content\":[{\"type\":\"text\",\"text\":\"query failed\"}]}") catch McpError.InvalidParams;
+            defer result.deinit(allocator);
 
-            var text = std.ArrayList(u8).initCapacity(std.heap.page_allocator, 256) catch return McpError.InvalidParams;
-            defer text.deinit(std.heap.page_allocator);
-            try text.writer(std.heap.page_allocator).print("found {d} hybrid results", .{result.results.items.len});
+            var text = std.ArrayList(u8).initCapacity(allocator, 256) catch return McpError.InvalidParams;
+            defer text.deinit(allocator);
+            try text.writer(allocator).print("found {d} hybrid results", .{result.results.items.len});
             for (result.results.items, 0..) |r, i| {
-                try text.writer(std.heap.page_allocator).print("\n{d}. {s} (zmd://{s}/{s}) score={d:.4}", .{ i + 1, r.title, r.collection, r.path, r.score });
+                try text.writer(allocator).print("\n{d}. {s} (zmd://{s}/{s}) score={d:.4}", .{ i + 1, r.title, r.collection, r.path, r.score });
             }
-            return std.fmt.allocPrint(std.heap.page_allocator, "{{\"content\":[{{\"type\":\"text\",\"text\":\"{s}\"}}]}}", .{text.items}) catch McpError.InvalidParams;
+            return std.fmt.allocPrint(allocator, "{{\"content\":[{{\"type\":\"text\",\"text\":\"{s}\"}}]}}", .{text.items}) catch McpError.InvalidParams;
         }
-        if (std.mem.eql(u8, name, "search")) {
-            const query_text = extractParam(args_json, "query") orelse "";
-            const collection = extractParam(args_json, "collection");
-            var result = search.searchFTS(&db_, std.heap.page_allocator, query_text, collection) catch return std.heap.page_allocator.dupe(u8, "{\"content\":[{\"type\":\"text\",\"text\":\"search failed\"}]}") catch McpError.InvalidParams;
-            defer result.deinit(std.heap.page_allocator);
+        if (std.mem.eql(u8, tool_call.name, "search")) {
+            const query_text = tool_call.query orelse "";
+            const collection = tool_call.collection;
+            var result = search.searchFTS(&db_, allocator, query_text, collection) catch return allocator.dupe(u8, "{\"content\":[{\"type\":\"text\",\"text\":\"search failed\"}]}") catch McpError.InvalidParams;
+            defer result.deinit(allocator);
 
-            var text = std.ArrayList(u8).initCapacity(std.heap.page_allocator, 256) catch return McpError.InvalidParams;
-            defer text.deinit(std.heap.page_allocator);
-            try text.writer(std.heap.page_allocator).print("found {d} fts results", .{result.results.items.len});
+            var text = std.ArrayList(u8).initCapacity(allocator, 256) catch return McpError.InvalidParams;
+            defer text.deinit(allocator);
+            try text.writer(allocator).print("found {d} fts results", .{result.results.items.len});
             for (result.results.items, 0..) |r, i| {
-                try text.writer(std.heap.page_allocator).print("\n{d}. {s} (zmd://{s}/{s}) score={d:.4}", .{ i + 1, r.title, r.collection, r.path, r.score });
+                try text.writer(allocator).print("\n{d}. {s} (zmd://{s}/{s}) score={d:.4}", .{ i + 1, r.title, r.collection, r.path, r.score });
             }
-            return std.fmt.allocPrint(std.heap.page_allocator, "{{\"content\":[{{\"type\":\"text\",\"text\":\"{s}\"}}]}}", .{text.items}) catch McpError.InvalidParams;
+            return std.fmt.allocPrint(allocator, "{{\"content\":[{{\"type\":\"text\",\"text\":\"{s}\"}}]}}", .{text.items}) catch McpError.InvalidParams;
         }
-        if (std.mem.eql(u8, name, "status")) {
-            var stmt = db_.prepare("SELECT count(*) FROM documents WHERE active = 1") catch return std.heap.page_allocator.dupe(u8, "{\"content\":[{\"type\":\"text\",\"text\":\"status failed\"}]}") catch McpError.InvalidParams;
+        if (std.mem.eql(u8, tool_call.name, "status")) {
+            var stmt = db_.prepare("SELECT count(*) FROM documents WHERE active = 1") catch return allocator.dupe(u8, "{\"content\":[{\"type\":\"text\",\"text\":\"status failed\"}]}") catch McpError.InvalidParams;
             defer stmt.finalize();
             const has_docs = stmt.step() catch false;
             const docs: i64 = if (has_docs) stmt.columnInt(0) else 0;
-            stmt = db_.prepare("SELECT count(*) FROM store_collections") catch return std.heap.page_allocator.dupe(u8, "{\"content\":[{\"type\":\"text\",\"text\":\"status failed\"}]}") catch McpError.InvalidParams;
+            stmt = db_.prepare("SELECT count(*) FROM store_collections") catch return allocator.dupe(u8, "{\"content\":[{\"type\":\"text\",\"text\":\"status failed\"}]}") catch McpError.InvalidParams;
             defer stmt.finalize();
             const has_cols = stmt.step() catch false;
             const cols: i64 = if (has_cols) stmt.columnInt(0) else 0;
-            const text = std.fmt.allocPrint(std.heap.page_allocator, "zmd status: OK, documents={d}, collections={d}", .{ docs, cols }) catch return McpError.InvalidParams;
-            return std.fmt.allocPrint(std.heap.page_allocator, "{{\"content\":[{{\"type\":\"text\",\"text\":\"{s}\"}}]}}", .{text}) catch McpError.InvalidParams;
+            const text = std.fmt.allocPrint(allocator, "zmd status: OK, documents={d}, collections={d}", .{ docs, cols }) catch return McpError.InvalidParams;
+            defer allocator.free(text);
+            return std.fmt.allocPrint(allocator, "{{\"content\":[{{\"type\":\"text\",\"text\":\"{s}\"}}]}}", .{text}) catch McpError.InvalidParams;
         }
-        if (std.mem.eql(u8, name, "get")) {
-            const raw_path = extractParam(args_json, "path") orelse return McpError.InvalidParams;
+        if (std.mem.eql(u8, tool_call.name, "get")) {
+            const raw_path = tool_call.path orelse return McpError.InvalidParams;
             const parsed = root.parse_virtual_path(raw_path) orelse return McpError.InvalidParams;
             const doc = store.findActiveDocument(&db_, parsed.collection, parsed.path) catch {
-                return std.heap.page_allocator.dupe(u8, "{\"content\":[{\"type\":\"text\",\"text\":\"document not found\"}]}") catch McpError.InvalidParams;
+                return allocator.dupe(u8, "{\"content\":[{\"type\":\"text\",\"text\":\"document not found\"}]}") catch McpError.InvalidParams;
             };
             defer {
-                std.heap.page_allocator.free(doc.title);
-                std.heap.page_allocator.free(doc.hash);
-                std.heap.page_allocator.free(doc.doc);
+                allocator.free(doc.title);
+                allocator.free(doc.hash);
+                allocator.free(doc.doc);
             }
-            var text = std.ArrayList(u8).initCapacity(std.heap.page_allocator, doc.doc.len + 64) catch return McpError.InvalidParams;
-            defer text.deinit(std.heap.page_allocator);
-            try text.writer(std.heap.page_allocator).print("Title: {s}\n\n{s}", .{ doc.title, doc.doc });
-            return std.fmt.allocPrint(std.heap.page_allocator, "{{\"content\":[{{\"type\":\"text\",\"text\":\"{s}\"}}]}}", .{text.items}) catch McpError.InvalidParams;
+            var text = std.ArrayList(u8).initCapacity(allocator, doc.doc.len + 64) catch return McpError.InvalidParams;
+            defer text.deinit(allocator);
+            try text.writer(allocator).print("Title: {s}\n\n{s}", .{ doc.title, doc.doc });
+            return std.fmt.allocPrint(allocator, "{{\"content\":[{{\"type\":\"text\",\"text\":\"{s}\"}}]}}", .{text.items}) catch McpError.InvalidParams;
         }
 
         return McpError.MethodNotFound;
+    }
+
+    fn parseToolCall(json: []const u8, allocator: std.mem.Allocator) !ParsedToolCall {
+        const parsed = std.json.parseFromSlice(std.json.Value, allocator, json, .{}) catch return McpError.InvalidParams;
+        defer parsed.deinit();
+
+        if (parsed.value != .object) return McpError.InvalidParams;
+        const params_obj = parsed.value.object;
+
+        const name_value = params_obj.get("name") orelse return McpError.InvalidParams;
+        if (name_value != .string) return McpError.InvalidParams;
+
+        const args_value = if (params_obj.get("arguments")) |arguments_value|
+            arguments_value
+        else
+            parsed.value;
+        if (args_value != .object) return McpError.InvalidParams;
+        const args_obj = args_value.object;
+
+        const name = try allocator.dupe(u8, name_value.string);
+        errdefer allocator.free(name);
+        const query = try dupOptionalString(args_obj.get("query"), allocator);
+        errdefer if (query) |value| allocator.free(value);
+        const collection = try dupOptionalString(args_obj.get("collection"), allocator);
+        errdefer if (collection) |value| allocator.free(value);
+        const path = try dupOptionalString(args_obj.get("path"), allocator);
+        errdefer if (path) |value| allocator.free(value);
+
+        return .{ .name = name, .query = query, .collection = collection, .path = path };
+    }
+
+    fn dupOptionalString(value: ?std.json.Value, allocator: std.mem.Allocator) !?[]u8 {
+        const actual = value orelse return null;
+        if (actual != .string) return McpError.InvalidParams;
+        return try allocator.dupe(u8, actual.string);
     }
 
     fn getServerInfo() []const u8 {
         return "{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{\"listChanged\":false}},\"serverInfo\":{\"name\":\"zmd\",\"version\":\"0.1.0\"}}";
     }
 
-    fn extractParam(json: []const u8, key: []const u8) ?[]const u8 {
-        const pattern = std.fmt.allocPrint(std.heap.page_allocator, "\"{s}\":\"", .{key}) catch return null;
-        defer std.heap.page_allocator.free(pattern);
-        const key_start = std.mem.indexOf(u8, json, pattern) orelse return null;
-        const start = key_start + pattern.len;
-        const end = std.mem.indexOfScalarPos(u8, json, start, '"') orelse return null;
-        return json[start..end];
+    fn formatResponse(id: []const u8, result: []const u8, allocator: std.mem.Allocator) ![]u8 {
+        return std.fmt.allocPrint(allocator, "{{\"jsonrpc\":\"2.0\",\"id\":{s},\"result\":{s}}}", .{ id, result });
     }
 
-    fn extractObjectParam(json: []const u8, key: []const u8) ?[]const u8 {
-        const pattern = std.fmt.allocPrint(std.heap.page_allocator, "\"{s}\":", .{key}) catch return null;
-        defer std.heap.page_allocator.free(pattern);
-        const key_start = std.mem.indexOf(u8, json, pattern) orelse return null;
-        var start = key_start + pattern.len;
-        while (start < json.len and (json[start] == ' ' or json[start] == '\n' or json[start] == '\t' or json[start] == '\r')) : (start += 1) {}
-        if (start >= json.len or json[start] != '{') return null;
-
-        var depth: i32 = 0;
-        var i = start;
-        while (i < json.len) : (i += 1) {
-            if (json[i] == '{') depth += 1;
-            if (json[i] == '}') {
-                depth -= 1;
-                if (depth == 0) return json[start .. i + 1];
-            }
-        }
-        return null;
-    }
-
-    fn formatResponse(id: []const u8, result: []const u8) ![]u8 {
-        return std.fmt.allocPrint(std.heap.page_allocator, "{{\"jsonrpc\":\"2.0\",\"id\":{s},\"result\":{s}}}", .{ id, result });
-    }
-
-    fn formatError(id: []const u8, message: []const u8) ![]u8 {
-        return std.fmt.allocPrint(std.heap.page_allocator, "{{\"jsonrpc\":\"2.0\",\"id\":{s},\"error\":{{\"code\":-32601,\"message\":\"{s}\"}}}}", .{ id, message });
+    fn formatError(id: []const u8, message: []const u8, allocator: std.mem.Allocator) ![]u8 {
+        return std.fmt.allocPrint(allocator, "{{\"jsonrpc\":\"2.0\",\"id\":{s},\"error\":{{\"code\":-32601,\"message\":\"{s}\"}}}}", .{ id, message });
     }
 };
 
@@ -279,47 +299,58 @@ test "McpServer struct can be defined" {
     _ = t;
 }
 
-test "extractMethod parses method name" {
+test "parseRequest parses method name" {
     const request = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}";
-    const method = McpServer.extractMethod(request);
-    try std.testing.expect(method != null);
-    try std.testing.expectEqualStrings("tools/list", method.?);
+    var parsed = try McpServer.parseRequest(request, std.testing.allocator);
+    defer parsed.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("tools/list", parsed.method);
 }
 
-test "extractId parses numeric id" {
+test "parseRequest serializes numeric id" {
     const request = "{\"jsonrpc\":\"2.0\",\"id\":42,\"method\":\"ping\"}";
-    const id = McpServer.extractId(request);
-    try std.testing.expect(id != null);
-    try std.testing.expectEqualStrings("42", id.?);
+    var parsed = try McpServer.parseRequest(request, std.testing.allocator);
+    defer parsed.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("42", parsed.id_json);
 }
 
-test "extractParam parses parameter" {
+test "parseToolCall parses direct params" {
     const json = "{\"name\":\"query\",\"query\":\"test\"}";
-    const name = McpServer.extractParam(json, "name");
-    try std.testing.expect(name != null);
-    try std.testing.expectEqualStrings("query", name.?);
+    var parsed = try McpServer.parseToolCall(json, std.testing.allocator);
+    defer parsed.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("query", parsed.name);
+    try std.testing.expectEqualStrings("test", parsed.query.?);
+}
+
+test "parseToolCall parses MCP arguments object" {
+    const json = "{\"name\":\"search\",\"arguments\":{\"query\":\"hello\",\"collection\":\"wiki\"}}";
+    var parsed = try McpServer.parseToolCall(json, std.testing.allocator);
+    defer parsed.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("search", parsed.name);
+    try std.testing.expectEqualStrings("hello", parsed.query.?);
+    try std.testing.expectEqualStrings("wiki", parsed.collection.?);
 }
 
 test "handleRequest supports ping" {
     const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}";
-    const resp = try McpServer.handleRequest(req);
-    defer std.heap.page_allocator.free(resp);
+    const allocator = std.testing.allocator;
+    const resp = try McpServer.handleRequest(req, allocator);
+    defer allocator.free(resp);
     try std.testing.expect(std.mem.indexOf(u8, resp, "pong") != null);
 }
 
 test "handleRequest rejects missing id" {
     const req = "{\"jsonrpc\":\"2.0\",\"method\":\"ping\"}";
-    try std.testing.expectError(McpError.ParseError, McpServer.handleRequest(req));
+    try std.testing.expectError(McpError.ParseError, McpServer.handleRequest(req, std.testing.allocator));
 }
 
 test "handleRequest rejects non-2.0 jsonrpc" {
     const req = "{\"jsonrpc\":\"1.0\",\"id\":1,\"method\":\"ping\"}";
-    try std.testing.expectError(McpError.ParseError, McpServer.handleRequest(req));
+    try std.testing.expectError(McpError.ParseError, McpServer.handleRequest(req, std.testing.allocator));
 }
 
 test "handleRequest rejects malformed params in tools/call" {
     const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":\"oops\"}";
-    try std.testing.expectError(McpError.InvalidParams, McpServer.handleRequest(req));
+    try std.testing.expectError(McpError.InvalidParams, McpServer.handleRequest(req, std.testing.allocator));
 }
 
 test "handleRequest returns method error for unknown tool" {
@@ -329,7 +360,7 @@ test "handleRequest returns method error for unknown tool" {
     defer allocator.free(db_path);
 
     const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"unknown\"}}";
-    try std.testing.expectError(McpError.MethodNotFound, McpServer.handleRequestWithDbPath(req, db_path));
+    try std.testing.expectError(McpError.MethodNotFound, McpServer.handleRequestWithDbPath(req, db_path, allocator));
 }
 
 const FakeReader = struct {
@@ -417,7 +448,7 @@ fn processFramedRequestForTest(request_body: []const u8, db_path_override: ?[]co
     const parsed = try McpServer.readMessage(&reader, allocator);
     defer allocator.free(parsed);
 
-    const response = try McpServer.handleRequestWithDbPath(parsed, db_path_override);
+    const response = try McpServer.handleRequestWithDbPath(parsed, db_path_override, allocator);
     defer allocator.free(response);
 
     var outbound = try std.ArrayList(u8).initCapacity(allocator, 0);
