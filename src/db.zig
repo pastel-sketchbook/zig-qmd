@@ -1,6 +1,7 @@
 const std = @import("std");
 const c = @cImport({
     @cInclude("sqlite3.h");
+    @cInclude("sqlite-vec.h");
 });
 
 /// Errors returned by database operations.
@@ -119,6 +120,9 @@ pub fn initSchema(db: *Db) DbError!void {
     try db.exec("PRAGMA journal_mode = WAL");
     try db.exec("PRAGMA foreign_keys = ON");
 
+    const vec_rc = c.sqlite3_vec_init(db.handle, null, null);
+    if (vec_rc != c.SQLITE_OK) return DbError.ExecFailed;
+
     // Content-addressable storage
     try db.exec(
         \\CREATE TABLE IF NOT EXISTS content (
@@ -166,6 +170,15 @@ pub fn initSchema(db: *Db) DbError!void {
         \\  embedding   TEXT NOT NULL,
         \\  embedded_at TEXT NOT NULL,
         \\  PRIMARY KEY (hash, seq, pos)
+        \\)
+    );
+    try db.exec(
+        \\CREATE VIRTUAL TABLE IF NOT EXISTS content_vectors_idx USING vec0(
+        \\  embedding float[384],
+        \\  hash TEXT,
+        \\  model TEXT,
+        \\  +seq INTEGER,
+        \\  +pos INTEGER
         \\)
     );
 
@@ -268,6 +281,7 @@ test "initSchema creates all tables" {
         "documents",
         "llm_cache",
         "content_vectors",
+        "content_vectors_idx",
         "store_collections",
         "store_config",
         "documents_fts",
@@ -283,6 +297,18 @@ test "initSchema creates all tables" {
         const count = stmt.columnInt(0);
         try std.testing.expect(count >= 1);
     }
+}
+
+test "sqlite-vec functions are registered" {
+    var db = try Db.open(":memory:");
+    defer db.close();
+    try initSchema(&db);
+
+    var stmt = try db.prepare("SELECT vec_version()");
+    defer stmt.finalize();
+    try std.testing.expect(try stmt.step());
+    const v = stmt.columnText(0);
+    try std.testing.expect(v != null);
 }
 
 test "FTS5 trigger fires on insert" {

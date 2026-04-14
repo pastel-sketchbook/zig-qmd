@@ -246,6 +246,22 @@ pub fn upsertContentVectorAt(
     try stmt.bindText(5, emb_json.items);
     try stmt.bindText(6, now);
     _ = try stmt.step();
+
+    var del_idx = try db_.prepare("DELETE FROM content_vectors_idx WHERE hash = ? AND seq = ? AND pos = ?");
+    defer del_idx.finalize();
+    try del_idx.bindText(1, hash);
+    try del_idx.bindInt(2, @intCast(seq));
+    try del_idx.bindInt(3, @intCast(pos));
+    _ = try del_idx.step();
+
+    var ins_idx = try db_.prepare("INSERT INTO content_vectors_idx(embedding, hash, model, seq, pos) VALUES(vec_f32(?), ?, ?, ?, ?)");
+    defer ins_idx.finalize();
+    try ins_idx.bindText(1, emb_json.items);
+    try ins_idx.bindText(2, hash);
+    try ins_idx.bindText(3, model);
+    try ins_idx.bindInt(4, @intCast(seq));
+    try ins_idx.bindInt(5, @intCast(pos));
+    _ = try ins_idx.step();
 }
 
 pub const CleanupStats = struct {
@@ -262,6 +278,9 @@ pub fn cleanupOrphans(db_: *db.Db) StoreError!CleanupStats {
     );
     try db_.exec(
         "DELETE FROM content_vectors WHERE hash NOT IN (SELECT DISTINCT hash FROM documents WHERE active = 1)",
+    );
+    try db_.exec(
+        "DELETE FROM content_vectors_idx WHERE hash NOT IN (SELECT DISTINCT hash FROM documents WHERE active = 1)",
     );
 
     return .{

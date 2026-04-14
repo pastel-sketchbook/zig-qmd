@@ -333,6 +333,11 @@ pub fn searchVec(
     const query_embedding = try embed_query(query);
     defer std.heap.page_allocator.free(query_embedding);
 
+    // Try native sqlite-vec first; fallback to JSON cosine path.
+    if (searchVecNative(db_, query_embedding, collection)) |native| {
+        return .{ .results = native };
+    } else |_| {}
+
     var best_by_doc = std.AutoHashMap(i64, ScoredResult).init(std.heap.page_allocator);
     defer best_by_doc.deinit();
 
@@ -397,6 +402,71 @@ pub fn searchVec(
     }.less);
 
     return .{ .results = results.items };
+}
+
+fn searchVecNative(db_: *db.Db, query_embedding: []const f32, collection: ?[]const u8) ![]ScoredResult {
+    const query_json = try encode_embedding_json(std.heap.page_allocator, query_embedding);
+    defer std.heap.page_allocator.free(query_json);
+
+    var best_by_doc = std.AutoHashMap(i64, ScoredResult).init(std.heap.page_allocator);
+    defer best_by_doc.deinit();
+
+    var stmt = try db_.prepare(
+        "SELECT d.id, d.hash, d.collection, d.path, d.title, v.distance FROM content_vectors_idx v JOIN documents d ON d.hash = v.hash WHERE d.active = 1 AND v.embedding MATCH vec_f32(?) AND k = 200 ORDER BY v.distance ASC",
+    );
+    defer stmt.finalize();
+    try stmt.bindText(1, query_json);
+
+    while (try stmt.step()) {
+        const id = stmt.columnInt(0);
+        const hsh = stmt.columnText(1);
+        const coll = stmt.columnText(2);
+        const pth = stmt.columnText(3);
+        const ttl = stmt.columnText(4);
+        const dist = stmt.columnDouble(5);
+
+        const hash = if (hsh) |h| try std.heap.page_allocator.dupe(u8, std.mem.span(h)) else try std.heap.page_allocator.dupe(u8, "");
+        const col = if (coll) |c| try std.heap.page_allocator.dupe(u8, std.mem.span(c)) else try std.heap.page_allocator.dupe(u8, "");
+        const path = if (pth) |p| try std.heap.page_allocator.dupe(u8, std.mem.span(p)) else try std.heap.page_allocator.dupe(u8, "");
+        const title = if (ttl) |t| try std.heap.page_allocator.dupe(u8, std.mem.span(t)) else try std.heap.page_allocator.dupe(u8, "");
+
+        if (collection != null and !std.mem.eql(u8, col, collection.?)) continue;
+
+        const score = 1.0 / (1.0 + dist);
+        const candidate = ScoredResult{ .id = id, .collection = col, .path = path, .title = title, .hash = hash, .score = score };
+        if (best_by_doc.get(id)) |existing| {
+            if (candidate.score > existing.score) {
+                try best_by_doc.put(id, candidate);
+            }
+        } else {
+            try best_by_doc.put(id, candidate);
+        }
+    }
+
+    var results = try std.ArrayList(ScoredResult).initCapacity(std.heap.page_allocator, best_by_doc.count());
+    var it = best_by_doc.iterator();
+    while (it.next()) |entry| {
+        try results.append(std.heap.page_allocator, entry.value_ptr.*);
+    }
+    std.sort.heap(ScoredResult, results.items, {}, struct {
+        fn less(_: void, a: ScoredResult, b: ScoredResult) bool {
+            return a.score > b.score;
+        }
+    }.less);
+
+    return results.items;
+}
+
+fn encode_embedding_json(allocator: std.mem.Allocator, embedding: []const f32) ![]u8 {
+    var out = try std.ArrayList(u8).initCapacity(allocator, embedding.len * 10 + 2);
+    defer out.deinit(allocator);
+    try out.append(allocator, '[');
+    for (embedding, 0..) |v, i| {
+        if (i > 0) try out.append(allocator, ',');
+        try out.writer(allocator).print("{d}", .{v});
+    }
+    try out.append(allocator, ']');
+    return out.toOwnedSlice(allocator);
 }
 
 fn embed_query(query: []const u8) ![]f32 {

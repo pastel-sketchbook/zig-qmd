@@ -22,6 +22,19 @@ pub fn build(b: *std.Build) void {
             "-DSQLITE_DQS=0",
         },
     });
+    sqlite.addCSourceFile(.{
+        .file = b.path("deps/sqlite-vec.c"),
+        .flags = &.{
+            "-DSQLITE_CORE",
+            "-DSQLITE_ENABLE_FTS5",
+            "-DSQLITE_ENABLE_JSON1",
+            "-DSQLITE_THREADSAFE=1",
+            "-DSQLITE_DQS=0",
+            "-DSQLITE_VEC_ENABLE_DISKANN=0",
+            "-DSQLITE_VEC_EXPERIMENTAL_IVF_ENABLE=0",
+            "-Wno-pointer-bool-conversion",
+        },
+    });
 
     // --- Library module (SDK) ---
     const mod = b.addModule("qmd", .{
