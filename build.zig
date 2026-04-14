@@ -45,13 +45,6 @@ pub fn build(b: *std.Build) void {
     });
     exe.linkLibrary(sqlite);
 
-    // Metal framework on macOS for future llama.cpp GPU acceleration
-    if (target.result.os.tag == .macos) {
-        exe.linkFramework("Metal");
-        exe.linkFramework("MetalKit");
-        exe.linkFramework("Accelerate");
-    }
-
     b.installArtifact(exe);
 
     // --- Run step ---

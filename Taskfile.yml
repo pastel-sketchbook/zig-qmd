@@ -92,6 +92,28 @@ tasks:
     cmds:
       - rm -rf .zig-cache zig-out
 
+  cross:linux:
+    desc: Cross-compile zmd for linux x86_64
+    cmds:
+      - zig build -Dtarget=x86_64-linux
+
+  cross:mac:
+    desc: Cross-compile zmd for macOS aarch64
+    cmds:
+      - zig build -Dtarget=aarch64-macos
+
+  cross:windows:
+    desc: Cross-compile zmd for windows x86_64
+    cmds:
+      - zig build -Dtarget=x86_64-windows
+
+  cross:
+    desc: Cross-compile common release targets
+    cmds:
+      - task cross:linux
+      - task cross:mac
+      - task cross:windows
+
   loc:
     desc: Count lines of code with tokei
     cmds:

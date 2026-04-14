@@ -116,7 +116,8 @@ pub fn main() !void {
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
 
-    var args = std.process.args();
+    var args = try std.process.argsWithAllocator(allocator);
+    defer args.deinit();
     _ = args.next();
 
     const cmd = args.next() orelse {
