@@ -180,9 +180,9 @@ pub const McpServer = struct {
 
             var text = std.ArrayList(u8).initCapacity(std.heap.page_allocator, 256) catch return McpError.InvalidParams;
             defer text.deinit(std.heap.page_allocator);
-            text.writer(std.heap.page_allocator).print("found {d} hybrid results", .{result.results.items.len}) catch {};
+            try text.writer(std.heap.page_allocator).print("found {d} hybrid results", .{result.results.items.len});
             for (result.results.items, 0..) |r, i| {
-                text.writer(std.heap.page_allocator).print("\n{d}. {s} (zmd://{s}/{s}) score={d:.4}", .{ i + 1, r.title, r.collection, r.path, r.score }) catch {};
+                try text.writer(std.heap.page_allocator).print("\n{d}. {s} (zmd://{s}/{s}) score={d:.4}", .{ i + 1, r.title, r.collection, r.path, r.score });
             }
             return std.fmt.allocPrint(std.heap.page_allocator, "{{\"content\":[{{\"type\":\"text\",\"text\":\"{s}\"}}]}}", .{text.items}) catch McpError.InvalidParams;
         }
@@ -194,9 +194,9 @@ pub const McpServer = struct {
 
             var text = std.ArrayList(u8).initCapacity(std.heap.page_allocator, 256) catch return McpError.InvalidParams;
             defer text.deinit(std.heap.page_allocator);
-            text.writer(std.heap.page_allocator).print("found {d} fts results", .{result.results.items.len}) catch {};
+            try text.writer(std.heap.page_allocator).print("found {d} fts results", .{result.results.items.len});
             for (result.results.items, 0..) |r, i| {
-                text.writer(std.heap.page_allocator).print("\n{d}. {s} (zmd://{s}/{s}) score={d:.4}", .{ i + 1, r.title, r.collection, r.path, r.score }) catch {};
+                try text.writer(std.heap.page_allocator).print("\n{d}. {s} (zmd://{s}/{s}) score={d:.4}", .{ i + 1, r.title, r.collection, r.path, r.score });
             }
             return std.fmt.allocPrint(std.heap.page_allocator, "{{\"content\":[{{\"type\":\"text\",\"text\":\"{s}\"}}]}}", .{text.items}) catch McpError.InvalidParams;
         }
@@ -225,7 +225,7 @@ pub const McpServer = struct {
             }
             var text = std.ArrayList(u8).initCapacity(std.heap.page_allocator, doc.doc.len + 64) catch return McpError.InvalidParams;
             defer text.deinit(std.heap.page_allocator);
-            text.writer(std.heap.page_allocator).print("Title: {s}\n\n{s}", .{ doc.title, doc.doc }) catch {};
+            try text.writer(std.heap.page_allocator).print("Title: {s}\n\n{s}", .{ doc.title, doc.doc });
             return std.fmt.allocPrint(std.heap.page_allocator, "{{\"content\":[{{\"type\":\"text\",\"text\":\"{s}\"}}]}}", .{text.items}) catch McpError.InvalidParams;
         }
 
@@ -436,7 +436,9 @@ fn setupMcpTestDb(allocator: std.mem.Allocator) ![]u8 {
     std.crypto.random.bytes(std.mem.asBytes(&rnd));
     const dir_path = try std.fmt.allocPrint(allocator, "/tmp/zmd-mcp-test-{x}", .{rnd});
     errdefer allocator.free(dir_path);
-    std.fs.cwd().makeDir(dir_path) catch {};
+    std.fs.cwd().makeDir(dir_path) catch |err| {
+        if (err != error.PathAlreadyExists) return err;
+    };
     const db_path = try std.fmt.allocPrint(allocator, "{s}/data.db", .{dir_path});
     allocator.free(dir_path);
 
@@ -453,10 +455,14 @@ fn setupMcpTestDb(allocator: std.mem.Allocator) ![]u8 {
 }
 
 fn cleanupMcpTestDb(db_path: []const u8) void {
-    std.fs.cwd().deleteFile(db_path) catch {};
+    std.fs.cwd().deleteFile(db_path) catch |err| {
+        if (err != error.FileNotFound) return;
+    };
     const slash = std.mem.lastIndexOfScalar(u8, db_path, '/') orelse return;
     const dir_path = db_path[0..slash];
-    std.fs.cwd().deleteDir(dir_path) catch {};
+    std.fs.cwd().deleteDir(dir_path) catch |err| {
+        if (err != error.FileNotFound) return;
+    };
 }
 
 test "framed tools/call status returns result envelope" {

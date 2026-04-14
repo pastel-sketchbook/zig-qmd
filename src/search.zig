@@ -212,7 +212,9 @@ pub fn hybridSearch(
         if (expanded) |q| {
             expanded_query_owned = q;
             effective_query = q;
-            llm.cachePut(db_, cache_key[0..], q) catch {};
+            llm.cachePut(db_, cache_key[0..], q) catch |err| {
+                if (err == error.OutOfMemory) return err;
+            };
         }
     }
 

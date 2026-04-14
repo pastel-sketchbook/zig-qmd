@@ -257,7 +257,9 @@ pub fn main() !void {
         var db_path_buf: [256]u8 = undefined;
         const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}", .{DB_PATH});
 
-        std.fs.cwd().makeDir(".qmd") catch {};
+        std.fs.cwd().makeDir(".qmd") catch |err| {
+            if (err != error.PathAlreadyExists) return err;
+        };
 
         var db_: qmd.db.Db = undefined;
         const open_result = qmd.db.Db.open(db_path);
@@ -350,7 +352,10 @@ pub fn main() !void {
                             defer allocator.free(formatted);
                             const emb = engine.embed(formatted) catch continue;
                             defer allocator.free(emb);
-                            qmd.store.upsertContentVectorAt(&db_, doc_hash[0..], @intCast(idx), 0, engine.model_path, emb, allocator) catch {};
+                            qmd.store.upsertContentVectorAt(&db_, doc_hash[0..], @intCast(idx), 0, engine.model_path, emb, allocator) catch |err| {
+                                if (err == error.OutOfMemory) return err;
+                                continue;
+                            };
                         }
                     } else {
                         // fallback deterministic embedding for now
@@ -364,7 +369,10 @@ pub fn main() !void {
                             defer allocator.free(formatted);
                             const emb = fallback.embed(formatted, allocator) catch continue;
                             defer allocator.free(emb);
-                            qmd.store.upsertContentVectorAt(&db_, doc_hash[0..], @intCast(idx), 0, "fallback-fnv", emb, allocator) catch {};
+                            qmd.store.upsertContentVectorAt(&db_, doc_hash[0..], @intCast(idx), 0, "fallback-fnv", emb, allocator) catch |err| {
+                                if (err == error.OutOfMemory) return err;
+                                continue;
+                            };
                         }
                     }
                     total_indexed += 1;
@@ -1091,7 +1099,9 @@ pub fn main() !void {
             return;
         };
 
-        qmd.store.vacuum(&db_) catch {};
+        qmd.store.vacuum(&db_) catch |err| {
+            try stdout.print("Warning: vacuum skipped: {any}\n", .{err});
+        };
 
         try stdout.print("Cleanup complete. Removed content: {d}, vectors: {d}\n", .{ stats.removed_content, stats.removed_vectors });
         try stdout.flush();

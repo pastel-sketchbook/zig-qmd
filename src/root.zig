@@ -81,7 +81,10 @@ pub const Qmd = struct {
                     defer self.allocator.free(formatted);
                     const emb = fallback.embed(formatted, self.allocator) catch continue;
                     defer self.allocator.free(emb);
-                    store.upsertContentVectorAt(&self.db, doc_hash[0..], @intCast(idx), 0, "fallback-fnv", emb, self.allocator) catch {};
+                    store.upsertContentVectorAt(&self.db, doc_hash[0..], @intCast(idx), 0, "fallback-fnv", emb, self.allocator) catch |err| {
+                        if (err == error.OutOfMemory) return err;
+                        continue;
+                    };
                 }
 
                 total_indexed += 1;
