@@ -88,10 +88,63 @@ pub const LlamaCpp = struct {
     }
 };
 
-pub fn formatTextForEmbedding(text: []const u8, is_query: bool) []u8 {
-    _ = is_query;
-    if (text.len > 1000) return text[0..1000];
-    return text;
+pub const EMBEDDING_MAX_TEXT_LEN: usize = 2048;
+
+pub fn formatTextForEmbedding(allocator: std.mem.Allocator, text: []const u8, is_query: bool) ![]u8 {
+    if (is_query) {
+        return formatQueryForEmbedding(allocator, text);
+    }
+    return formatDocForEmbedding(allocator, text);
+}
+
+pub fn formatQueryForEmbedding(allocator: std.mem.Allocator, query: []const u8) ![]u8 {
+    const normalized = try normalizeEmbeddingText(allocator, query, EMBEDDING_MAX_TEXT_LEN);
+    defer allocator.free(normalized);
+
+    var out = try std.ArrayList(u8).initCapacity(allocator, "query: ".len + normalized.len);
+    defer out.deinit(allocator);
+    try out.appendSlice(allocator, "query: ");
+    try out.appendSlice(allocator, normalized);
+    return out.toOwnedSlice(allocator);
+}
+
+pub fn formatDocForEmbedding(allocator: std.mem.Allocator, doc: []const u8) ![]u8 {
+    const normalized = try normalizeEmbeddingText(allocator, doc, EMBEDDING_MAX_TEXT_LEN);
+    defer allocator.free(normalized);
+
+    var out = try std.ArrayList(u8).initCapacity(allocator, "passage: ".len + normalized.len);
+    defer out.deinit(allocator);
+    try out.appendSlice(allocator, "passage: ");
+    try out.appendSlice(allocator, normalized);
+    return out.toOwnedSlice(allocator);
+}
+
+fn normalizeEmbeddingText(allocator: std.mem.Allocator, text: []const u8, max_len: usize) ![]u8 {
+    var out = try std.ArrayList(u8).initCapacity(allocator, @min(text.len, max_len));
+    defer out.deinit(allocator);
+
+    var prev_space = true;
+    for (text) |ch| {
+        if (out.items.len >= max_len) break;
+
+        const is_space = ch == ' ' or ch == '\n' or ch == '\t' or ch == '\r';
+        if (is_space) {
+            if (!prev_space and out.items.len < max_len) {
+                try out.append(allocator, ' ');
+                prev_space = true;
+            }
+            continue;
+        }
+
+        try out.append(allocator, ch);
+        prev_space = false;
+    }
+
+    if (out.items.len > 0 and out.items[out.items.len - 1] == ' ') {
+        _ = out.pop();
+    }
+
+    return out.toOwnedSlice(allocator);
 }
 
 pub fn cosineSimilarity(a: []const f32, b: []const f32) f32 {
@@ -170,6 +223,46 @@ pub fn rerank(results: []const SimpleResult, query: []const u8) ![]SimpleResult 
 }
 
 pub fn expandQuery(query: []const u8) ![]const u8 {
+    return expandQueryWithModel(std.heap.page_allocator, query, null, null) catch expandQueryHeuristic(query);
+}
+
+pub fn expandQueryWithModel(
+    allocator: std.mem.Allocator,
+    query: []const u8,
+    maybe_binary_path: ?[]const u8,
+    maybe_model_path: ?[]const u8,
+) ![]const u8 {
+    if (maybe_binary_path == null or maybe_model_path == null) {
+        return expandQueryHeuristic(query);
+    }
+
+    const run_result = std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{
+            maybe_binary_path.?,
+            "-m",
+            maybe_model_path.?,
+            "-n",
+            "32",
+            "-p",
+            query,
+        },
+        .max_output_bytes = 16 * 1024,
+    }) catch return expandQueryHeuristic(query);
+    defer allocator.free(run_result.stdout);
+    defer allocator.free(run_result.stderr);
+
+    if (run_result.term != .Exited or run_result.term.Exited != 0 or run_result.stdout.len == 0) {
+        return expandQueryHeuristic(query);
+    }
+
+    const trimmed = std.mem.trim(u8, run_result.stdout, &.{ ' ', '\n', '\r', '\t' });
+    if (trimmed.len == 0) return expandQueryHeuristic(query);
+
+    return allocator.dupe(u8, trimmed);
+}
+
+fn expandQueryHeuristic(query: []const u8) ![]const u8 {
     var expanded = try std.ArrayList(u8).initCapacity(std.heap.page_allocator, query.len);
     errdefer expanded.deinit(std.heap.page_allocator);
     try expanded.appendSlice(std.heap.page_allocator, query);
@@ -197,6 +290,42 @@ test "expandQuery adds question terms" {
     try std.testing.expect(std.mem.indexOf(u8, expanded, "method").? > 0);
 }
 
+test "parseModelSpec recognizes hf model" {
+    const spec = try parseModelSpec("hf://ggml-org/embeddinggemma-300M-qat-q4_0-GGUF:Q4_0");
+    try std.testing.expect(spec.source == .huggingface);
+    try std.testing.expectEqualStrings("ggml-org/embeddinggemma-300M-qat-q4_0-GGUF:Q4_0", spec.value);
+}
+
+test "parseModelSpec recognizes local model" {
+    const spec = try parseModelSpec("deps/models/model.gguf");
+    try std.testing.expect(spec.source == .local);
+    try std.testing.expectEqualStrings("deps/models/model.gguf", spec.value);
+}
+
+test "parseModelSpec rejects empty" {
+    try std.testing.expectError(EmbeddingError.InvalidModelSpec, parseModelSpec(""));
+}
+
+test "formatQueryForEmbedding normalizes and prefixes" {
+    const formatted = try formatQueryForEmbedding(std.testing.allocator, "  how\n to\tlogin  ");
+    defer std.testing.allocator.free(formatted);
+    try std.testing.expectEqualStrings("query: how to login", formatted);
+}
+
+test "formatDocForEmbedding normalizes and prefixes" {
+    const formatted = try formatDocForEmbedding(std.testing.allocator, "# Auth\n\nLogin flow details");
+    defer std.testing.allocator.free(formatted);
+    try std.testing.expectEqualStrings("passage: # Auth Login flow details", formatted);
+}
+
+test "formatDocForEmbedding truncates long input" {
+    var long: [3000]u8 = undefined;
+    @memset(&long, 'a');
+    const formatted = try formatDocForEmbedding(std.testing.allocator, &long);
+    defer std.testing.allocator.free(formatted);
+    try std.testing.expect(formatted.len <= "passage: ".len + EMBEDDING_MAX_TEXT_LEN);
+}
+
 test "LlmCache stores and retrieves" {
     var cache = LlmCache.init();
     defer cache.deinit();
@@ -211,6 +340,7 @@ test "LlmCache stores and retrieves" {
 pub const EmbeddingError = error{
     BinaryNotFound,
     ModelNotFound,
+    InvalidModelSpec,
     SpawnFailed,
     ProcessFailed,
     ParseError,
@@ -218,6 +348,41 @@ pub const EmbeddingError = error{
     OutOfMemory,
     Timeout,
 };
+
+pub const ModelSource = enum {
+    local,
+    huggingface,
+    url,
+};
+
+pub const ModelSpec = struct {
+    source: ModelSource,
+    value: []const u8,
+};
+
+pub fn parseModelSpec(model_path: []const u8) EmbeddingError!ModelSpec {
+    if (model_path.len == 0) return EmbeddingError.InvalidModelSpec;
+
+    if (std.mem.startsWith(u8, model_path, "hf://")) {
+        if (model_path.len <= 5) return EmbeddingError.InvalidModelSpec;
+        return .{ .source = .huggingface, .value = model_path[5..] };
+    }
+
+    if (std.mem.startsWith(u8, model_path, "https://") or std.mem.startsWith(u8, model_path, "http://")) {
+        return .{ .source = .url, .value = model_path };
+    }
+
+    return .{ .source = .local, .value = model_path };
+}
+
+pub fn validateModelPath(model_path: []const u8) EmbeddingError!void {
+    const model_spec = try parseModelSpec(model_path);
+    if (model_spec.source == .local) {
+        std.fs.cwd().access(model_spec.value, .{ .mode = .read_only }) catch {
+            return EmbeddingError.ModelNotFound;
+        };
+    }
+}
 
 /// Subprocess-based embedding engine using llama-embedding binary
 pub const LlamaEmbedding = struct {
@@ -240,16 +405,7 @@ pub const LlamaEmbedding = struct {
             return EmbeddingError.BinaryNotFound;
         };
 
-        // Validate model file exists for local paths.
-        // Remote specifiers like hf://... are resolved by llama.cpp itself.
-        const is_remote = std.mem.startsWith(u8, model_path, "hf://") or
-            std.mem.startsWith(u8, model_path, "https://") or
-            std.mem.startsWith(u8, model_path, "http://");
-        if (!is_remote) {
-            std.fs.cwd().access(model_path, .{ .mode = .read_only }) catch {
-                return EmbeddingError.ModelNotFound;
-            };
-        }
+        try validateModelPath(model_path);
 
         const bin_copy = allocator.dupe(u8, binary_path) catch return EmbeddingError.OutOfMemory;
         errdefer allocator.free(bin_copy);
@@ -311,12 +467,20 @@ pub const LlamaEmbedding = struct {
 
         try argv.append(self.allocator, self.binary_path);
 
-        if (std.mem.startsWith(u8, self.model_path, "hf://")) {
-            try argv.append(self.allocator, "--hf-repo");
-            try argv.append(self.allocator, self.model_path[5..]);
-        } else {
-            try argv.append(self.allocator, "-m");
-            try argv.append(self.allocator, self.model_path);
+        const model_spec = parseModelSpec(self.model_path) catch return EmbeddingError.InvalidModelSpec;
+        switch (model_spec.source) {
+            .huggingface => {
+                try argv.append(self.allocator, "--hf-repo");
+                try argv.append(self.allocator, model_spec.value);
+            },
+            .url => {
+                try argv.append(self.allocator, "--model-url");
+                try argv.append(self.allocator, model_spec.value);
+            },
+            .local => {
+                try argv.append(self.allocator, "-m");
+                try argv.append(self.allocator, model_spec.value);
+            },
         }
 
         try argv.append(self.allocator, "--embd-output-format");

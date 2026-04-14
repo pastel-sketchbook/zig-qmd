@@ -175,7 +175,24 @@ pub fn hybridSearch(
     collection: ?[]const u8,
     options: HybridOptions,
 ) !HybridResult {
-    const fts_result = try searchFTS(db_, query, collection);
+    var effective_query = query;
+    var expanded_query_owned: ?[]const u8 = null;
+    defer if (expanded_query_owned) |q| std.heap.page_allocator.free(q);
+
+    if (options.enable_query_expansion) {
+        const bin_path = std.process.getEnvVarOwned(std.heap.page_allocator, "QMD_LLAMA_EMBED_BIN") catch null;
+        defer if (bin_path) |p| std.heap.page_allocator.free(p);
+        const model_path = std.process.getEnvVarOwned(std.heap.page_allocator, "QMD_LLAMA_MODEL") catch null;
+        defer if (model_path) |p| std.heap.page_allocator.free(p);
+
+        const expanded = llm.expandQueryWithModel(std.heap.page_allocator, query, bin_path, model_path) catch null;
+        if (expanded) |q| {
+            expanded_query_owned = q;
+            effective_query = q;
+        }
+    }
+
+    const fts_result = try searchFTS(db_, effective_query, collection);
 
     var fts_scored = try std.ArrayList(ScoredResult).initCapacity(std.heap.page_allocator, fts_result.results.items.len);
     errdefer fts_scored.deinit(std.heap.page_allocator);
@@ -186,7 +203,7 @@ pub fn hybridSearch(
 
     var vec_scored: []ScoredResult = &.{};
     if (options.enable_vector) {
-        const vec_result = try searchVec(db_, query, collection);
+        const vec_result = try searchVec(db_, effective_query, collection);
         vec_scored = vec_result.results;
     }
 
@@ -194,7 +211,11 @@ pub fn hybridSearch(
     lists[0] = fts_scored.items;
     lists[1] = vec_scored;
 
-    const fused = reciprocalRankFusion(&lists, options.rrf_k);
+    var fused = reciprocalRankFusion(&lists, options.rrf_k);
+
+    if (options.enable_rerank and fused.len > 1) {
+        fused = try rerankByEmbedding(effective_query, fused);
+    }
 
     var final_results = try std.ArrayList(SearchResult).initCapacity(std.heap.page_allocator, @min(fused.len, options.max_results));
     errdefer final_results.deinit(std.heap.page_allocator);
@@ -215,11 +236,41 @@ pub fn hybridSearch(
 
 pub const HybridOptions = struct {
     enable_vector: bool = false,
+    enable_query_expansion: bool = false,
     enable_rerank: bool = false,
     rrf_k: f64 = RRF_K,
     max_results: usize = 20,
     min_score: f64 = 0.0,
 };
+
+fn rerankByEmbedding(query: []const u8, results: []ScoredResult) ![]ScoredResult {
+    const allocator = std.heap.page_allocator;
+    const q_emb = try embed_query(query);
+    defer allocator.free(q_emb);
+
+    var rescored = try allocator.alloc(ScoredResult, results.len);
+    for (results, 0..) |r, i| {
+        const formatted = try llm.formatDocForEmbedding(allocator, r.title);
+        defer allocator.free(formatted);
+
+        var fallback = try llm.LlamaCpp.init("/nonexistent", allocator);
+        defer fallback.deinit();
+        const d_emb = try fallback.embed(formatted, allocator);
+        defer allocator.free(d_emb);
+
+        var item = r;
+        item.score = llm.cosineSimilarity(q_emb, d_emb);
+        rescored[i] = item;
+    }
+
+    std.sort.heap(ScoredResult, rescored, {}, struct {
+        fn less(_: void, a: ScoredResult, b: ScoredResult) bool {
+            return a.score > b.score;
+        }
+    }.less);
+
+    return rescored;
+}
 
 pub const HybridResult = struct {
     results: std.ArrayList(SearchResult),
@@ -287,6 +338,8 @@ pub fn searchVec(
 
 fn embed_query(query: []const u8) ![]f32 {
     const allocator = std.heap.page_allocator;
+    const formatted_query = try llm.formatQueryForEmbedding(allocator, query);
+    defer allocator.free(formatted_query);
 
     const bin_path = std.process.getEnvVarOwned(allocator, "QMD_LLAMA_EMBED_BIN") catch null;
     defer if (bin_path) |p| allocator.free(p);
@@ -298,19 +351,19 @@ fn embed_query(query: []const u8) ![]f32 {
         var engine = llm.LlamaEmbedding.init(allocator, bin_path.?, model_path.?) catch {
             var fallback = try llm.LlamaCpp.init("/nonexistent", allocator);
             defer fallback.deinit();
-            return fallback.embed(query, allocator);
+            return fallback.embed(formatted_query, allocator);
         };
         defer engine.deinit();
-        return engine.embed(query) catch {
+        return engine.embed(formatted_query) catch {
             var fallback = try llm.LlamaCpp.init("/nonexistent", allocator);
             defer fallback.deinit();
-            return fallback.embed(query, allocator);
+            return fallback.embed(formatted_query, allocator);
         };
     }
 
     var fallback = try llm.LlamaCpp.init("/nonexistent", allocator);
     defer fallback.deinit();
-    return fallback.embed(query, allocator);
+    return fallback.embed(formatted_query, allocator);
 }
 
 fn parse_embedding_json_array(json: []const u8) ![]f32 {
@@ -404,6 +457,44 @@ test "searchVec uses stored vectors and ranks by cosine" {
     const result = try searchVec(&db_, "auth", null);
     try std.testing.expect(result.results.len >= 2);
     try std.testing.expect(result.results[0].score >= result.results[1].score);
+}
+
+test "hybridSearch supports query expansion option" {
+    var db_ = try db.Db.open(":memory:");
+    defer db_.close();
+    try db.initSchema(&db_);
+
+    try store.insertDocument(&db_, "test", "a.md", "# Login\nHow to authenticate users");
+    try store.insertDocument(&db_, "test", "b.md", "# Cooking\nHow to boil pasta");
+
+    var result = try hybridSearch(&db_, "how login?", null, .{
+        .enable_vector = true,
+        .enable_query_expansion = true,
+        .enable_rerank = false,
+        .max_results = 10,
+    });
+    defer result.results.deinit(std.heap.page_allocator);
+
+    try std.testing.expect(result.results.items.len > 0);
+}
+
+test "hybridSearch supports rerank option" {
+    var db_ = try db.Db.open(":memory:");
+    defer db_.close();
+    try db.initSchema(&db_);
+
+    try store.insertDocument(&db_, "test", "a.md", "# Authentication\nOAuth token login");
+    try store.insertDocument(&db_, "test", "b.md", "# Recipe\nPasta cooking instructions");
+
+    var result = try hybridSearch(&db_, "oauth login", null, .{
+        .enable_vector = true,
+        .enable_query_expansion = false,
+        .enable_rerank = true,
+        .max_results = 10,
+    });
+    defer result.results.deinit(std.heap.page_allocator);
+
+    try std.testing.expect(result.results.items.len > 0);
 }
 
 test "buildFTS5Query parses simple tokens" {

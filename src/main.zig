@@ -236,7 +236,12 @@ pub fn main() !void {
                     if (make_embedding_engine(allocator)) |engine_instance| {
                         var engine = engine_instance;
                         defer engine.deinit();
-                        const emb = engine.embed(content) catch {
+                        const formatted = qmd.llm.formatDocForEmbedding(allocator, content) catch {
+                            total_indexed += 1;
+                            continue;
+                        };
+                        defer allocator.free(formatted);
+                        const emb = engine.embed(formatted) catch {
                             total_indexed += 1;
                             continue;
                         };
@@ -249,7 +254,12 @@ pub fn main() !void {
                             continue;
                         };
                         defer fallback.deinit();
-                        const emb = fallback.embed(content, allocator) catch {
+                        const formatted = qmd.llm.formatDocForEmbedding(allocator, content) catch {
+                            total_indexed += 1;
+                            continue;
+                        };
+                        defer allocator.free(formatted);
+                        const emb = fallback.embed(formatted, allocator) catch {
                             total_indexed += 1;
                             continue;
                         };
@@ -274,6 +284,19 @@ pub fn main() !void {
             return;
         };
 
+        var enable_expand = false;
+        var enable_rerank = false;
+        while (args.next()) |flag| {
+            if (std.mem.eql(u8, flag, "--expand")) {
+                enable_expand = true;
+                continue;
+            }
+            if (std.mem.eql(u8, flag, "--rerank")) {
+                enable_rerank = true;
+                continue;
+            }
+        }
+
         var db_path_buf: [256]u8 = undefined;
         const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}", .{DB_PATH});
         var db_ = qmd.db.Db.open(db_path) catch {
@@ -285,6 +308,8 @@ pub fn main() !void {
 
         var result = qmd.search.hybridSearch(&db_, query_text, null, .{
             .enable_vector = true,
+            .enable_query_expansion = enable_expand,
+            .enable_rerank = enable_rerank,
             .rrf_k = qmd.search.RRF_K,
             .max_results = 10,
         }) catch {
