@@ -80,6 +80,9 @@ pub const McpServer = struct {
     }
 
     fn handleRequestWithDbPath(request: []const u8, db_path_override: ?[]const u8) ![]u8 {
+        const version = extractJsonRpc(request) orelse return McpError.ParseError;
+        if (!std.mem.eql(u8, version, "2.0")) return McpError.ParseError;
+
         const id = extractId(request) orelse return McpError.ParseError;
         const method = extractMethod(request) orelse return McpError.ParseError;
 
@@ -97,6 +100,13 @@ pub const McpServer = struct {
             return try formatResponse(id, "pong");
         }
         return try formatError(id, "method not found");
+    }
+
+    fn extractJsonRpc(request: []const u8) ?[]const u8 {
+        const start_key = std.mem.indexOf(u8, request, "\"jsonrpc\":\"") orelse return null;
+        const start = start_key + 11;
+        const end = std.mem.indexOfScalarPos(u8, request, start, '"') orelse return null;
+        return request[start..end];
     }
 
     fn extractId(request: []const u8) ?[]const u8 {
@@ -273,6 +283,31 @@ test "handleRequest supports ping" {
     const resp = try McpServer.handleRequest(req);
     defer std.heap.page_allocator.free(resp);
     try std.testing.expect(std.mem.indexOf(u8, resp, "pong") != null);
+}
+
+test "handleRequest rejects missing id" {
+    const req = "{\"jsonrpc\":\"2.0\",\"method\":\"ping\"}";
+    try std.testing.expectError(McpError.ParseError, McpServer.handleRequest(req));
+}
+
+test "handleRequest rejects non-2.0 jsonrpc" {
+    const req = "{\"jsonrpc\":\"1.0\",\"id\":1,\"method\":\"ping\"}";
+    try std.testing.expectError(McpError.ParseError, McpServer.handleRequest(req));
+}
+
+test "handleRequest rejects malformed params in tools/call" {
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":\"oops\"}";
+    try std.testing.expectError(McpError.InvalidParams, McpServer.handleRequest(req));
+}
+
+test "handleRequest returns method error for unknown tool" {
+    const allocator = std.testing.allocator;
+    const db_path = try setupMcpTestDb(allocator);
+    defer cleanupMcpTestDb(db_path);
+    defer allocator.free(db_path);
+
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"unknown\"}}";
+    try std.testing.expectError(McpError.MethodNotFound, McpServer.handleRequestWithDbPath(req, db_path));
 }
 
 const FakeReader = struct {

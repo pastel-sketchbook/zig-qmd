@@ -17,6 +17,16 @@ tasks:
     cmds:
       - zig build test
 
+  test:mcp:
+    desc: Run MCP-related tests (unit + protocol)
+    cmds:
+      - zig build test -- --test-filter mcp
+
+  test:mcp:framed:
+    desc: Run framed MCP transport tests only
+    cmds:
+      - zig build test -- --test-filter framed
+
   fmt:
     desc: Format Zig code
     cmds:
@@ -32,6 +42,12 @@ tasks:
     cmds:
       - zig fmt --check .
       - zig build test
+
+  check:mcp:
+    desc: Check format and run MCP protocol tests
+    cmds:
+      - zig fmt --check .
+      - zig build test -- --test-filter mcp
 
   e2e:
     desc: Run end-to-end test with fresh database and test files
