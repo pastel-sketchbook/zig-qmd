@@ -89,6 +89,184 @@ pub const LlamaCpp = struct {
     }
 };
 
+pub const ChatRole = enum {
+    system,
+    user,
+    assistant,
+};
+
+pub const ChatMessage = struct {
+    role: ChatRole,
+    content: []u8,
+};
+
+pub const LlamaChatSession = struct {
+    allocator: std.mem.Allocator,
+    binary_path: []u8,
+    model_path: []u8,
+    history: std.ArrayList(ChatMessage),
+    max_history: usize = 12,
+
+    pub fn init(allocator: std.mem.Allocator, binary_path: []const u8, model_path: []const u8) !LlamaChatSession {
+        return .{
+            .allocator = allocator,
+            .binary_path = try allocator.dupe(u8, binary_path),
+            .model_path = try allocator.dupe(u8, model_path),
+            .history = try std.ArrayList(ChatMessage).initCapacity(allocator, 8),
+        };
+    }
+
+    pub fn deinit(self: *LlamaChatSession) void {
+        for (self.history.items) |msg| self.allocator.free(msg.content);
+        self.history.deinit(self.allocator);
+        self.allocator.free(self.binary_path);
+        self.allocator.free(self.model_path);
+    }
+
+    pub fn addSystemPrompt(self: *LlamaChatSession, prompt: []const u8) !void {
+        try self.appendMessage(.system, prompt);
+    }
+
+    pub fn send(self: *LlamaChatSession, user_input: []const u8) ![]u8 {
+        try self.appendMessage(.user, user_input);
+
+        const prompt = try self.buildPrompt();
+        defer self.allocator.free(prompt);
+
+        const response = runGeneration(self.allocator, self.binary_path, self.model_path, prompt) catch try self.allocator.dupe(u8, "Model unavailable");
+        try self.appendOwnedMessage(.assistant, response);
+        return try self.allocator.dupe(u8, response);
+    }
+
+    fn appendMessage(self: *LlamaChatSession, role: ChatRole, content: []const u8) !void {
+        const copy = try self.allocator.dupe(u8, content);
+        try self.appendOwnedMessage(role, copy);
+    }
+
+    fn appendOwnedMessage(self: *LlamaChatSession, role: ChatRole, content: []u8) !void {
+        try self.history.append(self.allocator, .{ .role = role, .content = content });
+        if (self.history.items.len > self.max_history) {
+            const old = self.history.orderedRemove(0);
+            self.allocator.free(old.content);
+        }
+    }
+
+    fn buildPrompt(self: *LlamaChatSession) ![]u8 {
+        var out = try std.ArrayList(u8).initCapacity(self.allocator, 1024);
+        defer out.deinit(self.allocator);
+        for (self.history.items) |msg| {
+            const prefix = switch (msg.role) {
+                .system => "system",
+                .user => "user",
+                .assistant => "assistant",
+            };
+            try out.writer(self.allocator).print("{s}: {s}\n", .{ prefix, msg.content });
+        }
+        try out.appendSlice(self.allocator, "assistant:");
+        return out.toOwnedSlice(self.allocator);
+    }
+};
+
+pub fn rerankPassages(
+    allocator: std.mem.Allocator,
+    query: []const u8,
+    passages: []const []const u8,
+    maybe_binary_path: ?[]const u8,
+    maybe_model_path: ?[]const u8,
+) ![]f32 {
+    var scores = try allocator.alloc(f32, passages.len);
+    for (passages, 0..) |p, i| {
+        const generated = if (maybe_binary_path != null and maybe_model_path != null)
+            scoreWithGeneration(allocator, query, p, maybe_binary_path.?, maybe_model_path.?)
+        else
+            null;
+
+        if (generated) |s| {
+            scores[i] = s;
+        } else {
+            scores[i] = lexicalRelevanceScore(query, p);
+        }
+    }
+    return scores;
+}
+
+fn runGeneration(allocator: std.mem.Allocator, binary_path: []const u8, model_path: []const u8, prompt: []const u8) ![]u8 {
+    if (binary_path.len == 0 or model_path.len == 0) return error.SpawnFailed;
+
+    var argv = try std.ArrayList([]const u8).initCapacity(allocator, 16);
+    defer argv.deinit(allocator);
+    try argv.append(allocator, binary_path);
+
+    const spec = parseModelSpec(model_path) catch return error.SpawnFailed;
+    switch (spec.source) {
+        .huggingface => {
+            try argv.append(allocator, "--hf-repo");
+            try argv.append(allocator, spec.value);
+        },
+        .url => {
+            try argv.append(allocator, "--model-url");
+            try argv.append(allocator, spec.value);
+        },
+        .local => {
+            try argv.append(allocator, "-m");
+            try argv.append(allocator, spec.value);
+        },
+    }
+    try argv.append(allocator, "-n");
+    try argv.append(allocator, "96");
+    try argv.append(allocator, "-p");
+    try argv.append(allocator, prompt);
+
+    const run_result = std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = argv.items,
+        .max_output_bytes = 64 * 1024,
+    }) catch return error.SpawnFailed;
+    defer allocator.free(run_result.stderr);
+    defer allocator.free(run_result.stdout);
+
+    if (run_result.term != .Exited or run_result.term.Exited != 0) return error.SpawnFailed;
+    const trimmed = std.mem.trim(u8, run_result.stdout, &.{ ' ', '\n', '\r', '\t' });
+    if (trimmed.len == 0) return error.SpawnFailed;
+    return allocator.dupe(u8, trimmed);
+}
+
+fn scoreWithGeneration(allocator: std.mem.Allocator, query: []const u8, passage: []const u8, binary_path: []const u8, model_path: []const u8) ?f32 {
+    const prompt = std.fmt.allocPrint(allocator, "Rate relevance from 0 to 1.\nQuery: {s}\nPassage: {s}\nScore:", .{ query, passage }) catch return null;
+    defer allocator.free(prompt);
+
+    const out = runGeneration(allocator, binary_path, model_path, prompt) catch return null;
+    defer allocator.free(out);
+
+    var tok = std.mem.tokenizeAny(u8, out, " \n\r\t,:;");
+    while (tok.next()) |t| {
+        const f = std.fmt.parseFloat(f32, t) catch continue;
+        return @max(@as(f32, 0), @min(@as(f32, 1), f));
+    }
+    return null;
+}
+
+fn lexicalRelevanceScore(query: []const u8, passage: []const u8) f32 {
+    const allocator = std.heap.page_allocator;
+    const p_lower = allocator.alloc(u8, passage.len) catch return 0;
+    defer allocator.free(p_lower);
+    for (passage, 0..) |ch, i| p_lower[i] = std.ascii.toLower(ch);
+
+    var matches: f32 = 0;
+    var total: f32 = 0;
+    var q_it = std.mem.tokenizeAny(u8, query, " \n\r\t,.;:!?()[]{}\"'");
+    while (q_it.next()) |tok| {
+        if (tok.len < 2) continue;
+        total += 1;
+        const t_lower = allocator.alloc(u8, tok.len) catch continue;
+        defer allocator.free(t_lower);
+        for (tok, 0..) |ch, i| t_lower[i] = std.ascii.toLower(ch);
+        if (std.mem.indexOf(u8, p_lower, t_lower) != null) matches += 1;
+    }
+    if (total == 0) return 0;
+    return matches / total;
+}
+
 pub const EMBEDDING_MAX_TEXT_LEN: usize = 2048;
 
 pub fn formatTextForEmbedding(allocator: std.mem.Allocator, text: []const u8, is_query: bool) ![]u8 {
@@ -770,4 +948,30 @@ test "cachePut and cacheGet roundtrip" {
     try std.testing.expect(value != null);
     defer std.testing.allocator.free(value.?);
     try std.testing.expectEqualStrings("cached value", value.?);
+}
+
+test "LlamaChatSession stores bounded history" {
+    var session = try LlamaChatSession.init(std.testing.allocator, "/bin/false", "/tmp/none.gguf");
+    defer session.deinit();
+
+    session.max_history = 3;
+    try session.addSystemPrompt("You are helpful");
+    const _r1 = try session.send("hello");
+    std.testing.allocator.free(_r1);
+    const _r2 = try session.send("next");
+    std.testing.allocator.free(_r2);
+    const _r3 = try session.send("third");
+    std.testing.allocator.free(_r3);
+    try std.testing.expect(session.history.items.len <= 3);
+}
+
+test "rerankPassages falls back without model" {
+    const passages: []const []const u8 = &.{
+        "OAuth login and token refresh",
+        "Pasta and olive oil recipe",
+    };
+    const scores = try rerankPassages(std.testing.allocator, "oauth token", passages, null, null);
+    defer std.testing.allocator.free(scores);
+    try std.testing.expect(scores.len == 2);
+    try std.testing.expect(scores[0] >= scores[1]);
 }

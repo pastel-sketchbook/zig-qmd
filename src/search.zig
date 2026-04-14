@@ -289,6 +289,14 @@ fn rerankByEmbedding(db_: *db.Db, query: []const u8, results: []ScoredResult) ![
     const q_emb = try embed_text(query, true);
     defer allocator.free(q_emb);
 
+    const bin_path = std.process.getEnvVarOwned(allocator, "QMD_LLAMA_EMBED_BIN") catch null;
+    defer if (bin_path) |p| allocator.free(p);
+    const model_path = std.process.getEnvVarOwned(allocator, "QMD_LLAMA_MODEL") catch null;
+    defer if (model_path) |p| allocator.free(p);
+
+    var passages = try allocator.alloc([]const u8, results.len);
+    defer allocator.free(passages);
+
     var rescored = try allocator.alloc(ScoredResult, results.len);
     for (results, 0..) |r, i| {
         var source_text = r.title;
@@ -302,12 +310,23 @@ fn rerankByEmbedding(db_: *db.Db, query: []const u8, results: []ScoredResult) ![
             source_text = d.doc;
         }
 
+        passages[i] = source_text;
+
         const d_emb = embed_text(source_text, false) catch q_emb;
         defer if (d_emb.ptr != q_emb.ptr) allocator.free(d_emb);
 
         var item = r;
         item.score = llm.cosineSimilarity(q_emb, d_emb);
         rescored[i] = item;
+    }
+
+    const gen_scores = llm.rerankPassages(allocator, query, passages, bin_path, model_path) catch null;
+    defer if (gen_scores) |s| allocator.free(s);
+
+    if (gen_scores) |scores| {
+        for (rescored, 0..) |*r, i| {
+            r.score = r.score * 0.5 + @as(f64, scores[i]) * 0.5;
+        }
     }
 
     std.sort.heap(ScoredResult, rescored, {}, struct {
