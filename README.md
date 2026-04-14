@@ -8,6 +8,42 @@
 - Targets both a CLI and embeddable Zig library usage
 - Keeps local-first behavior (SQLite, local files, local model integrations)
 
+## Quick start
+
+```sh
+# Build
+zig build          # or: task build
+
+# Add a collection and index it
+zmd collection add notes ~/Documents/notes
+zmd update
+
+# Search
+zmd search "authentication flow"
+zmd vsearch "how does login work"
+zmd query "quarterly planning decisions"
+zmd context "jujutsu"
+```
+
+## Search output
+
+Results are sorted by relevance score (highest first) by default:
+
+```
+1. Jujutsu (jj) for Git-compatible Workflow (zmd://wiki/videos/details/TmlqoKqMD2Y.md) score=0.9055
+2. Version Control with jj (zmd://wiki/notes/vcs.md) score=0.7821
+```
+
+Use `--sort=index` to order by database row id (insertion order) instead:
+
+```sh
+zmd search "auth" --sort=index
+```
+
+All search commands (`search`, `vsearch`, `query`, `context`) support:
+- `--json`, `--csv`, `--md` output formats
+- `--sort=score` (default) or `--sort=index` ordering
+
 ## Credits
 
 This repository is a porting effort based on the original **QMD** project by Tobi Lutke and contributors:

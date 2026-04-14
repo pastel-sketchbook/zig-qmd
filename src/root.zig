@@ -10,7 +10,7 @@ pub const mcp = @import("mcp.zig");
 pub const ast = @import("ast.zig");
 
 /// ZMD library version, kept in sync with the VERSION file.
-pub const version = "0.1.0";
+pub const version = "0.2.0";
 
 /// High-level QMD engine providing collection management, indexing, and search.
 pub const Qmd = struct {

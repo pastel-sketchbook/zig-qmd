@@ -14,6 +14,14 @@ const OutputFormat = enum {
     md,
 };
 
+/// Controls the ordering of search results in CLI output.
+const SortOrder = enum {
+    /// Sort by relevance score descending (default).
+    score,
+    /// Sort by database row id ascending (insertion order).
+    index,
+};
+
 const DocRef = struct {
     collection: []const u8,
     path: []const u8,
@@ -24,6 +32,45 @@ fn parseOutputFlag(arg: []const u8) ?OutputFormat {
     if (std.mem.eql(u8, arg, "--csv")) return .csv;
     if (std.mem.eql(u8, arg, "--md")) return .md;
     return null;
+}
+
+/// Parses `--sort=score` or `--sort=index` from a CLI argument.
+fn parseSortFlag(arg: []const u8) ?SortOrder {
+    if (std.mem.eql(u8, arg, "--sort=score")) return .score;
+    if (std.mem.eql(u8, arg, "--sort=index")) return .index;
+    return null;
+}
+
+/// Sorts search results in place according to the given order.
+fn sortSearchResults(items: []qmd.search.SearchResult, order: SortOrder) void {
+    switch (order) {
+        .score => std.sort.heap(qmd.search.SearchResult, items, {}, struct {
+            fn less(_: void, a: qmd.search.SearchResult, b: qmd.search.SearchResult) bool {
+                return a.score > b.score;
+            }
+        }.less),
+        .index => std.sort.heap(qmd.search.SearchResult, items, {}, struct {
+            fn less(_: void, a: qmd.search.SearchResult, b: qmd.search.SearchResult) bool {
+                return a.id < b.id;
+            }
+        }.less),
+    }
+}
+
+/// Sorts scored results in place according to the given order.
+fn sortScoredResults(items: []qmd.search.ScoredResult, order: SortOrder) void {
+    switch (order) {
+        .score => std.sort.heap(qmd.search.ScoredResult, items, {}, struct {
+            fn less(_: void, a: qmd.search.ScoredResult, b: qmd.search.ScoredResult) bool {
+                return a.score > b.score;
+            }
+        }.less),
+        .index => std.sort.heap(qmd.search.ScoredResult, items, {}, struct {
+            fn less(_: void, a: qmd.search.ScoredResult, b: qmd.search.ScoredResult) bool {
+                return a.id < b.id;
+            }
+        }.less),
+    }
 }
 
 fn parseDocRef(input: []const u8) ?DocRef {
@@ -402,7 +449,7 @@ pub fn main() !void {
             return;
         };
         if (std.mem.eql(u8, first_arg, "--help") or std.mem.eql(u8, first_arg, "-h")) {
-            try stdout.writeAll("Usage: zmd query <query> [--expand] [--rerank] [--json|--csv|--md]\n");
+            try stdout.writeAll("Usage: zmd query <query> [--expand] [--rerank] [--json|--csv|--md] [--sort=score|--sort=index]\n");
             try stdout.flush();
             return;
         }
@@ -411,6 +458,7 @@ pub fn main() !void {
         var enable_expand = false;
         var enable_rerank = false;
         var output_format: OutputFormat = .text;
+        var sort_order: SortOrder = .score;
         while (args.next()) |flag| {
             if (std.mem.eql(u8, flag, "--expand")) {
                 enable_expand = true;
@@ -422,6 +470,10 @@ pub fn main() !void {
             }
             if (parseOutputFlag(flag)) |fmt| {
                 output_format = fmt;
+                continue;
+            }
+            if (parseSortFlag(flag)) |so| {
+                sort_order = so;
                 continue;
             }
         }
@@ -448,11 +500,13 @@ pub fn main() !void {
         };
         defer result.deinit(allocator);
 
+        sortSearchResults(result.results.items, sort_order);
+
         switch (output_format) {
             .text => {
                 try stdout.print("Found {d} results (hybrid)\n", .{result.results.items.len});
                 for (result.results.items, 0..) |r, i| {
-                    try stdout.print("  {d}. {s} ({s}) - score: {d:.4}\n", .{ i + 1, r.title, r.collection, r.score });
+                    try stdout.print("{d}. {s} (zmd://{s}/{s}) score={d:.4}\n", .{ i + 1, r.title, r.collection, r.path, r.score });
                 }
             },
             .json => {
@@ -506,20 +560,25 @@ pub fn main() !void {
 
     if (std.mem.eql(u8, cmd, "context")) {
         const first_arg = args.next() orelse {
-            try stdout.writeAll("Usage: zmd context <query> [--json|--csv|--md]\n");
+            try stdout.writeAll("Usage: zmd context <query> [--json|--csv|--md] [--sort=score|--sort=index]\n");
             try stdout.flush();
             return;
         };
         if (std.mem.eql(u8, first_arg, "--help") or std.mem.eql(u8, first_arg, "-h")) {
-            try stdout.writeAll("Usage: zmd context <query> [--json|--csv|--md]\n");
+            try stdout.writeAll("Usage: zmd context <query> [--json|--csv|--md] [--sort=score|--sort=index]\n");
             try stdout.flush();
             return;
         }
         const query_text = first_arg;
 
         var output_format: OutputFormat = .text;
+        var sort_order: SortOrder = .score;
         while (args.next()) |arg| {
-            if (parseOutputFlag(arg)) |fmt| output_format = fmt;
+            if (parseOutputFlag(arg)) |fmt| {
+                output_format = fmt;
+            } else if (parseSortFlag(arg)) |so| {
+                sort_order = so;
+            }
         }
 
         var db_path_buf: [256]u8 = undefined;
@@ -540,6 +599,8 @@ pub fn main() !void {
             return;
         };
         defer result.deinit(allocator);
+
+        sortSearchResults(result.results.items, sort_order);
 
         switch (output_format) {
             .json => {
@@ -638,16 +699,19 @@ pub fn main() !void {
             return;
         };
         if (std.mem.eql(u8, first_arg, "--help") or std.mem.eql(u8, first_arg, "-h")) {
-            try stdout.writeAll("Usage: zmd search <query> [collection] [--json|--csv|--md]\n");
+            try stdout.writeAll("Usage: zmd search <query> [collection] [--json|--csv|--md] [--sort=score|--sort=index]\n");
             try stdout.flush();
             return;
         }
         const query_text = first_arg;
         var collection: ?[]const u8 = null;
         var output_format: OutputFormat = .text;
+        var sort_order: SortOrder = .score;
         while (args.next()) |arg| {
             if (parseOutputFlag(arg)) |fmt| {
                 output_format = fmt;
+            } else if (parseSortFlag(arg)) |so| {
+                sort_order = so;
             } else if (collection == null) {
                 collection = arg;
             }
@@ -669,6 +733,8 @@ pub fn main() !void {
         };
         defer result.deinit(allocator);
 
+        sortSearchResults(result.results.items, sort_order);
+
         switch (output_format) {
             .text => {
                 if (result.results.items.len == 0) {
@@ -676,7 +742,7 @@ pub fn main() !void {
                 } else {
                     try stdout.print("Found {d} results:\n", .{result.results.items.len});
                     for (result.results.items, 0..) |r, i| {
-                        try stdout.print("  {d}. title='{s}' collection='{s}' path='{s}' score={d:.4}\n", .{ i + 1, r.title, r.collection, r.path, r.score });
+                        try stdout.print("{d}. {s} (zmd://{s}/{s}) score={d:.4}\n", .{ i + 1, r.title, r.collection, r.path, r.score });
                     }
                 }
             },
@@ -728,15 +794,20 @@ pub fn main() !void {
             return;
         };
         if (std.mem.eql(u8, first_arg, "--help") or std.mem.eql(u8, first_arg, "-h")) {
-            try stdout.writeAll("Usage: zmd vsearch <query> [--json|--csv|--md]\n");
+            try stdout.writeAll("Usage: zmd vsearch <query> [--json|--csv|--md] [--sort=score|--sort=index]\n");
             try stdout.flush();
             return;
         }
         const query_text = first_arg;
 
         var output_format: OutputFormat = .text;
+        var sort_order: SortOrder = .score;
         while (args.next()) |arg| {
-            if (parseOutputFlag(arg)) |fmt| output_format = fmt;
+            if (parseOutputFlag(arg)) |fmt| {
+                output_format = fmt;
+            } else if (parseSortFlag(arg)) |so| {
+                sort_order = so;
+            }
         }
 
         var db_path_buf: [256]u8 = undefined;
@@ -754,6 +825,8 @@ pub fn main() !void {
             return;
         };
 
+        sortScoredResults(result.results, sort_order);
+
         switch (output_format) {
             .text => {
                 if (result.results.len == 0) {
@@ -761,7 +834,7 @@ pub fn main() !void {
                 } else {
                     try stdout.print("Found {d} results (vector):\n", .{result.results.len});
                     for (result.results, 0..) |r, i| {
-                        try stdout.print("  {d}. {s} - {s}/{s} (score: {d:.4})\n", .{ i + 1, r.title, r.collection, r.path, r.score });
+                        try stdout.print("{d}. {s} (zmd://{s}/{s}) score={d:.4}\n", .{ i + 1, r.title, r.collection, r.path, r.score });
                     }
                 }
             },
@@ -1173,4 +1246,35 @@ test "extractSnippet returns contextual content" {
     const snippet = try extractSnippet(std.testing.allocator, "oauth", doc);
     defer std.testing.allocator.free(snippet);
     try std.testing.expect(std.mem.indexOf(u8, snippet, "OAuth") != null);
+}
+
+test "parseSortFlag parses known sort orders" {
+    try std.testing.expect(parseSortFlag("--sort=score").? == .score);
+    try std.testing.expect(parseSortFlag("--sort=index").? == .index);
+    try std.testing.expect(parseSortFlag("--sort=nope") == null);
+    try std.testing.expect(parseSortFlag("--json") == null);
+}
+
+test "sortSearchResults orders by score descending" {
+    var items = [_]qmd.search.SearchResult{
+        .{ .id = 1, .collection = "a", .path = "a", .title = "A", .hash = "", .score = 0.3 },
+        .{ .id = 2, .collection = "a", .path = "b", .title = "B", .hash = "", .score = 0.9 },
+        .{ .id = 3, .collection = "a", .path = "c", .title = "C", .hash = "", .score = 0.6 },
+    };
+    sortSearchResults(&items, .score);
+    try std.testing.expectEqual(@as(i64, 2), items[0].id);
+    try std.testing.expectEqual(@as(i64, 3), items[1].id);
+    try std.testing.expectEqual(@as(i64, 1), items[2].id);
+}
+
+test "sortSearchResults orders by index ascending" {
+    var items = [_]qmd.search.SearchResult{
+        .{ .id = 3, .collection = "a", .path = "c", .title = "C", .hash = "", .score = 0.9 },
+        .{ .id = 1, .collection = "a", .path = "a", .title = "A", .hash = "", .score = 0.3 },
+        .{ .id = 2, .collection = "a", .path = "b", .title = "B", .hash = "", .score = 0.6 },
+    };
+    sortSearchResults(&items, .index);
+    try std.testing.expectEqual(@as(i64, 1), items[0].id);
+    try std.testing.expectEqual(@as(i64, 2), items[1].id);
+    try std.testing.expectEqual(@as(i64, 3), items[2].id);
 }
