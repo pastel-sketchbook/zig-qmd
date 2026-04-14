@@ -225,6 +225,11 @@ pub fn hybridSearch(
         var hash = r.hash;
         if (std.mem.eql(u8, title, "")) {
             const doc = store.findActiveDocument(db_, r.collection, r.path) catch continue;
+            defer {
+                std.heap.page_allocator.free(doc.title);
+                std.heap.page_allocator.free(doc.hash);
+                std.heap.page_allocator.free(doc.doc);
+            }
             title = doc.title;
             hash = doc.hash;
         }

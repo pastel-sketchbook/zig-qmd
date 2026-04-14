@@ -7,6 +7,59 @@ const DB_PATH = ".qmd/data.db";
 const DEFAULT_LLAMA_EMBED_BIN = "deps/llama.cpp/build/bin/llama-embedding";
 const DEFAULT_LLAMA_MODEL_PATH = "";
 
+const OutputFormat = enum {
+    text,
+    json,
+    csv,
+    md,
+};
+
+const DocRef = struct {
+    collection: []const u8,
+    path: []const u8,
+};
+
+fn parseOutputFlag(arg: []const u8) ?OutputFormat {
+    if (std.mem.eql(u8, arg, "--json")) return .json;
+    if (std.mem.eql(u8, arg, "--csv")) return .csv;
+    if (std.mem.eql(u8, arg, "--md")) return .md;
+    return null;
+}
+
+fn parseDocRef(input: []const u8) ?DocRef {
+    const raw = if (std.mem.startsWith(u8, input, "qmd://")) input[6..] else input;
+    const slash = std.mem.indexOfScalar(u8, raw, '/') orelse return null;
+    if (slash == 0 or slash + 1 >= raw.len) return null;
+    return .{ .collection = raw[0..slash], .path = raw[slash + 1 ..] };
+}
+
+fn writeJsonString(out: anytype, s: []const u8) !void {
+    try out.writeAll("\"");
+    for (s) |ch| {
+        switch (ch) {
+            '"' => try out.writeAll("\\\""),
+            '\\' => try out.writeAll("\\\\"),
+            '\n' => try out.writeAll("\\n"),
+            '\r' => try out.writeAll("\\r"),
+            '\t' => try out.writeAll("\\t"),
+            else => try out.print("{c}", .{ch}),
+        }
+    }
+    try out.writeAll("\"");
+}
+
+fn writeCsvField(out: anytype, s: []const u8) !void {
+    try out.writeAll("\"");
+    for (s) |ch| {
+        if (ch == '"') {
+            try out.writeAll("\"\"");
+        } else {
+            try out.print("{c}", .{ch});
+        }
+    }
+    try out.writeAll("\"");
+}
+
 fn make_embedding_engine(allocator: std.mem.Allocator) ?qmd.llm.LlamaEmbedding {
     const bin_path = std.process.getEnvVarOwned(allocator, "QMD_LLAMA_EMBED_BIN") catch allocator.dupe(u8, DEFAULT_LLAMA_EMBED_BIN) catch return null;
 
@@ -42,7 +95,7 @@ pub fn main() !void {
 
     const cmd = args.next() orelse {
         try stdout.writeAll("Usage: zmd <command>\n");
-        try stdout.writeAll("Commands: version, collection, update, search, vsearch, query, get, status, mcp, ls, cleanup, embed\n");
+        try stdout.writeAll("Commands: version, collection, update, search, vsearch, query, get, multi-get, status, mcp, ls, cleanup, embed\n");
         try stdout.flush();
         return;
     };
@@ -57,6 +110,7 @@ pub fn main() !void {
         try stdout.writeAll("  vsearch    Vector semantic search\n");
         try stdout.writeAll("  query      Hybrid search (FTS + vector)\n");
         try stdout.writeAll("  get        Get document by path\n");
+        try stdout.writeAll("  multi-get  Get multiple documents by path\n");
         try stdout.writeAll("  status     Show system status\n");
         try stdout.writeAll("  mcp        Start MCP server\n");
         try stdout.writeAll("  ls         List documents\n");
@@ -286,6 +340,7 @@ pub fn main() !void {
 
         var enable_expand = false;
         var enable_rerank = false;
+        var output_format: OutputFormat = .text;
         while (args.next()) |flag| {
             if (std.mem.eql(u8, flag, "--expand")) {
                 enable_expand = true;
@@ -293,6 +348,10 @@ pub fn main() !void {
             }
             if (std.mem.eql(u8, flag, "--rerank")) {
                 enable_rerank = true;
+                continue;
+            }
+            if (parseOutputFlag(flag)) |fmt| {
+                output_format = fmt;
                 continue;
             }
         }
@@ -319,9 +378,57 @@ pub fn main() !void {
         };
         defer result.results.deinit(std.heap.page_allocator);
 
-        try stdout.print("Found {d} results (hybrid)\n", .{result.results.items.len});
-        for (result.results.items, 0..) |r, i| {
-            try stdout.print("  {d}. {s} ({s}) - score: {d:.4}\n", .{ i + 1, r.title, r.collection, r.score });
+        switch (output_format) {
+            .text => {
+                try stdout.print("Found {d} results (hybrid)\n", .{result.results.items.len});
+                for (result.results.items, 0..) |r, i| {
+                    try stdout.print("  {d}. {s} ({s}) - score: {d:.4}\n", .{ i + 1, r.title, r.collection, r.score });
+                }
+            },
+            .json => {
+                try stdout.writeAll("[\n");
+                for (result.results.items, 0..) |r, i| {
+                    if (i > 0) try stdout.writeAll(",\n");
+                    const vpath = try std.fmt.allocPrint(allocator, "qmd://{s}/{s}", .{ r.collection, r.path });
+                    try stdout.writeAll("  {\"id\":");
+                    try stdout.print("{d}", .{r.id});
+                    try stdout.writeAll(",\"collection\":");
+                    try writeJsonString(stdout, r.collection);
+                    try stdout.writeAll(",\"path\":");
+                    try writeJsonString(stdout, r.path);
+                    try stdout.writeAll(",\"virtual_path\":");
+                    try writeJsonString(stdout, vpath);
+                    try stdout.writeAll(",\"title\":");
+                    try writeJsonString(stdout, r.title);
+                    try stdout.writeAll(",\"score\":");
+                    try stdout.print("{d}", .{r.score});
+                    try stdout.writeAll("}");
+                    allocator.free(vpath);
+                }
+                try stdout.writeAll("\n]\n");
+            },
+            .csv => {
+                try stdout.writeAll("id,collection,path,virtual_path,title,score\n");
+                for (result.results.items) |r| {
+                    const vpath = try std.fmt.allocPrint(allocator, "qmd://{s}/{s}", .{ r.collection, r.path });
+                    try stdout.print("{d},", .{r.id});
+                    try writeCsvField(stdout, r.collection);
+                    try stdout.writeAll(",");
+                    try writeCsvField(stdout, r.path);
+                    try stdout.writeAll(",");
+                    try writeCsvField(stdout, vpath);
+                    try stdout.writeAll(",");
+                    try writeCsvField(stdout, r.title);
+                    try stdout.print(",{d}\n", .{r.score});
+                    allocator.free(vpath);
+                }
+            },
+            .md => {
+                try stdout.writeAll("| rank | score | collection | path | title |\n|---:|---:|---|---|---|\n");
+                for (result.results.items, 0..) |r, i| {
+                    try stdout.print("| {d} | {d:.4} | {s} | qmd://{s}/{s} | {s} |\n", .{ i + 1, r.score, r.collection, r.collection, r.path, r.title });
+                }
+            },
         }
         try stdout.flush();
         return;
@@ -333,7 +440,15 @@ pub fn main() !void {
             try stdout.flush();
             return;
         };
-        const collection = args.next();
+        var collection: ?[]const u8 = null;
+        var output_format: OutputFormat = .text;
+        while (args.next()) |arg| {
+            if (parseOutputFlag(arg)) |fmt| {
+                output_format = fmt;
+            } else if (collection == null) {
+                collection = arg;
+            }
+        }
 
         var db_path_buf: [256]u8 = undefined;
         const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}", .{DB_PATH});
@@ -351,13 +466,53 @@ pub fn main() !void {
         };
         defer result.results.deinit(std.heap.page_allocator);
 
-        if (result.results.items.len == 0) {
-            try stdout.writeAll("No results found.\n");
-        } else {
-            try stdout.print("Found {d} results:\n", .{result.results.items.len});
-            for (result.results.items, 0..) |r, i| {
-                try stdout.print("  {d}. title='{s}' collection='{s}' path='{s}' score={d:.4}\n", .{ i + 1, r.title, r.collection, r.path, r.score });
-            }
+        switch (output_format) {
+            .text => {
+                if (result.results.items.len == 0) {
+                    try stdout.writeAll("No results found.\n");
+                } else {
+                    try stdout.print("Found {d} results:\n", .{result.results.items.len});
+                    for (result.results.items, 0..) |r, i| {
+                        try stdout.print("  {d}. title='{s}' collection='{s}' path='{s}' score={d:.4}\n", .{ i + 1, r.title, r.collection, r.path, r.score });
+                    }
+                }
+            },
+            .json => {
+                try stdout.writeAll("[\n");
+                for (result.results.items, 0..) |r, i| {
+                    if (i > 0) try stdout.writeAll(",\n");
+                    try stdout.writeAll("  {\"id\":");
+                    try stdout.print("{d}", .{r.id});
+                    try stdout.writeAll(",\"collection\":");
+                    try writeJsonString(stdout, r.collection);
+                    try stdout.writeAll(",\"path\":");
+                    try writeJsonString(stdout, r.path);
+                    try stdout.writeAll(",\"title\":");
+                    try writeJsonString(stdout, r.title);
+                    try stdout.writeAll(",\"score\":");
+                    try stdout.print("{d}", .{r.score});
+                    try stdout.writeAll("}");
+                }
+                try stdout.writeAll("\n]\n");
+            },
+            .csv => {
+                try stdout.writeAll("id,collection,path,title,score\n");
+                for (result.results.items) |r| {
+                    try stdout.print("{d},", .{r.id});
+                    try writeCsvField(stdout, r.collection);
+                    try stdout.writeAll(",");
+                    try writeCsvField(stdout, r.path);
+                    try stdout.writeAll(",");
+                    try writeCsvField(stdout, r.title);
+                    try stdout.print(",{d}\n", .{r.score});
+                }
+            },
+            .md => {
+                try stdout.writeAll("| rank | score | collection | path | title |\n|---:|---:|---|---|---|\n");
+                for (result.results.items, 0..) |r, i| {
+                    try stdout.print("| {d} | {d:.4} | {s} | qmd://{s}/{s} | {s} |\n", .{ i + 1, r.score, r.collection, r.collection, r.path, r.title });
+                }
+            },
         }
         try stdout.flush();
         return;
@@ -369,6 +524,11 @@ pub fn main() !void {
             try stdout.flush();
             return;
         };
+
+        var output_format: OutputFormat = .text;
+        while (args.next()) |arg| {
+            if (parseOutputFlag(arg)) |fmt| output_format = fmt;
+        }
 
         var db_path_buf: [256]u8 = undefined;
         const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}", .{DB_PATH});
@@ -385,13 +545,53 @@ pub fn main() !void {
             return;
         };
 
-        if (result.results.len == 0) {
-            try stdout.writeAll("No results found.\n");
-        } else {
-            try stdout.print("Found {d} results (vector):\n", .{result.results.len});
-            for (result.results, 0..) |r, i| {
-                try stdout.print("  {d}. {s} - {s}/{s} (score: {d:.4})\n", .{ i + 1, r.title, r.collection, r.path, r.score });
-            }
+        switch (output_format) {
+            .text => {
+                if (result.results.len == 0) {
+                    try stdout.writeAll("No results found.\n");
+                } else {
+                    try stdout.print("Found {d} results (vector):\n", .{result.results.len});
+                    for (result.results, 0..) |r, i| {
+                        try stdout.print("  {d}. {s} - {s}/{s} (score: {d:.4})\n", .{ i + 1, r.title, r.collection, r.path, r.score });
+                    }
+                }
+            },
+            .json => {
+                try stdout.writeAll("[\n");
+                for (result.results, 0..) |r, i| {
+                    if (i > 0) try stdout.writeAll(",\n");
+                    try stdout.writeAll("  {\"id\":");
+                    try stdout.print("{d}", .{r.id});
+                    try stdout.writeAll(",\"collection\":");
+                    try writeJsonString(stdout, r.collection);
+                    try stdout.writeAll(",\"path\":");
+                    try writeJsonString(stdout, r.path);
+                    try stdout.writeAll(",\"title\":");
+                    try writeJsonString(stdout, r.title);
+                    try stdout.writeAll(",\"score\":");
+                    try stdout.print("{d}", .{r.score});
+                    try stdout.writeAll("}");
+                }
+                try stdout.writeAll("\n]\n");
+            },
+            .csv => {
+                try stdout.writeAll("id,collection,path,title,score\n");
+                for (result.results) |r| {
+                    try stdout.print("{d},", .{r.id});
+                    try writeCsvField(stdout, r.collection);
+                    try stdout.writeAll(",");
+                    try writeCsvField(stdout, r.path);
+                    try stdout.writeAll(",");
+                    try writeCsvField(stdout, r.title);
+                    try stdout.print(",{d}\n", .{r.score});
+                }
+            },
+            .md => {
+                try stdout.writeAll("| rank | score | collection | path | title |\n|---:|---:|---|---|---|\n");
+                for (result.results, 0..) |r, i| {
+                    try stdout.print("| {d} | {d:.4} | {s} | qmd://{s}/{s} | {s} |\n", .{ i + 1, r.score, r.collection, r.collection, r.path, r.title });
+                }
+            },
         }
         try stdout.flush();
         return;
@@ -413,21 +613,161 @@ pub fn main() !void {
         };
         defer db_.close();
 
-        var parts = std.mem.splitScalar(u8, doc_path, '/');
-        const collection = parts.first();
-        const path = parts.rest();
+        const ref = parseDocRef(doc_path) orelse {
+            try stdout.writeAll("Invalid document path. Use collection/path or qmd://collection/path\n");
+            try stdout.flush();
+            return;
+        };
 
-        const doc = qmd.store.findActiveDocument(&db_, collection, path) catch {
+        const doc = qmd.store.findActiveDocument(&db_, ref.collection, ref.path) catch {
             try stdout.writeAll("Document not found.\n");
             try stdout.flush();
             return;
         };
+        defer {
+            std.heap.page_allocator.free(doc.title);
+            std.heap.page_allocator.free(doc.hash);
+            std.heap.page_allocator.free(doc.doc);
+        }
 
         try stdout.writeAll("Title: ");
         try stdout.writeAll(doc.title);
         try stdout.writeAll("\n\n");
         try stdout.writeAll(doc.doc);
         try stdout.writeAll("\n");
+        try stdout.flush();
+        return;
+    }
+
+    if (std.mem.eql(u8, cmd, "multi-get")) {
+        var output_format: OutputFormat = .text;
+        var refs = try std.ArrayList([]const u8).initCapacity(allocator, 0);
+        defer refs.deinit(allocator);
+
+        while (args.next()) |arg| {
+            if (parseOutputFlag(arg)) |fmt| {
+                output_format = fmt;
+            } else {
+                try refs.append(allocator, arg);
+            }
+        }
+
+        if (refs.items.len == 0) {
+            try stdout.writeAll("Usage: zmd multi-get <doc-ref...> [--json|--csv|--md]\n");
+            try stdout.flush();
+            return;
+        }
+
+        var db_path_buf: [256]u8 = undefined;
+        const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}", .{DB_PATH});
+        var db_ = qmd.db.Db.open(db_path) catch {
+            try stdout.writeAll("Error: Database not found.\n");
+            try stdout.flush();
+            return;
+        };
+        defer db_.close();
+
+        switch (output_format) {
+            .text => {
+                for (refs.items, 0..) |raw_ref, i| {
+                    const ref = parseDocRef(raw_ref) orelse {
+                        try stdout.print("Skipping invalid ref: {s}\n", .{raw_ref});
+                        continue;
+                    };
+                    const doc = qmd.store.findActiveDocument(&db_, ref.collection, ref.path) catch {
+                        try stdout.print("Not found: qmd://{s}/{s}\n", .{ ref.collection, ref.path });
+                        continue;
+                    };
+                    defer {
+                        std.heap.page_allocator.free(doc.title);
+                        std.heap.page_allocator.free(doc.hash);
+                        std.heap.page_allocator.free(doc.doc);
+                    }
+
+                    if (i > 0) try stdout.writeAll("\n---\n\n");
+                    try stdout.print("# {s}\n", .{doc.title});
+                    try stdout.print("Path: qmd://{s}/{s}\n\n", .{ ref.collection, ref.path });
+                    try stdout.writeAll(doc.doc);
+                    try stdout.writeAll("\n");
+                }
+            },
+            .json => {
+                try stdout.writeAll("[\n");
+                var first = true;
+                for (refs.items) |raw_ref| {
+                    const ref = parseDocRef(raw_ref) orelse continue;
+                    const doc = qmd.store.findActiveDocument(&db_, ref.collection, ref.path) catch continue;
+                    defer {
+                        std.heap.page_allocator.free(doc.title);
+                        std.heap.page_allocator.free(doc.hash);
+                        std.heap.page_allocator.free(doc.doc);
+                    }
+                    if (!first) try stdout.writeAll(",\n");
+                    first = false;
+
+                    const vpath = try std.fmt.allocPrint(allocator, "qmd://{s}/{s}", .{ ref.collection, ref.path });
+
+                    try stdout.writeAll("  {\"collection\":");
+                    try writeJsonString(stdout, ref.collection);
+                    try stdout.writeAll(",\"path\":");
+                    try writeJsonString(stdout, ref.path);
+                    try stdout.writeAll(",\"virtual_path\":");
+                    try writeJsonString(stdout, vpath);
+                    try stdout.writeAll(",\"title\":");
+                    try writeJsonString(stdout, doc.title);
+                    try stdout.writeAll(",\"hash\":");
+                    try writeJsonString(stdout, doc.hash);
+                    try stdout.writeAll(",\"doc\":");
+                    try writeJsonString(stdout, doc.doc);
+                    try stdout.writeAll("}");
+                    allocator.free(vpath);
+                }
+                try stdout.writeAll("\n]\n");
+            },
+            .csv => {
+                try stdout.writeAll("collection,path,virtual_path,title,hash,doc\n");
+                for (refs.items) |raw_ref| {
+                    const ref = parseDocRef(raw_ref) orelse continue;
+                    const doc = qmd.store.findActiveDocument(&db_, ref.collection, ref.path) catch continue;
+                    defer {
+                        std.heap.page_allocator.free(doc.title);
+                        std.heap.page_allocator.free(doc.hash);
+                        std.heap.page_allocator.free(doc.doc);
+                    }
+                    const vpath = try std.fmt.allocPrint(allocator, "qmd://{s}/{s}", .{ ref.collection, ref.path });
+
+                    try writeCsvField(stdout, ref.collection);
+                    try stdout.writeAll(",");
+                    try writeCsvField(stdout, ref.path);
+                    try stdout.writeAll(",");
+                    try writeCsvField(stdout, vpath);
+                    try stdout.writeAll(",");
+                    try writeCsvField(stdout, doc.title);
+                    try stdout.writeAll(",");
+                    try writeCsvField(stdout, doc.hash);
+                    try stdout.writeAll(",");
+                    try writeCsvField(stdout, doc.doc);
+                    try stdout.writeAll("\n");
+                    allocator.free(vpath);
+                }
+            },
+            .md => {
+                for (refs.items, 0..) |raw_ref, i| {
+                    const ref = parseDocRef(raw_ref) orelse continue;
+                    const doc = qmd.store.findActiveDocument(&db_, ref.collection, ref.path) catch continue;
+                    defer {
+                        std.heap.page_allocator.free(doc.title);
+                        std.heap.page_allocator.free(doc.hash);
+                        std.heap.page_allocator.free(doc.doc);
+                    }
+                    if (i > 0) try stdout.writeAll("\n\n---\n\n");
+                    try stdout.print("## {s}\n\n", .{doc.title});
+                    try stdout.print("- path: `qmd://{s}/{s}`\n\n", .{ ref.collection, ref.path });
+                    try stdout.writeAll(doc.doc);
+                    try stdout.writeAll("\n");
+                }
+            },
+        }
         try stdout.flush();
         return;
     }
@@ -496,12 +836,14 @@ pub fn main() !void {
                 return;
             };
             defer {
+                for (result.paths.items) |p| std.heap.page_allocator.free(p);
+                for (result.titles.items) |t| std.heap.page_allocator.free(t);
                 result.paths.deinit(std.heap.page_allocator);
                 result.titles.deinit(std.heap.page_allocator);
             }
 
             for (result.paths.items, result.titles.items) |path, title| {
-                try stdout.print("  {s}: {s}\n", .{ path, title });
+                try stdout.print("  qmd://{s}/{s}: {s}\n", .{ c, path, title });
             }
         } else {
             var result = qmd.config.listCollections(&db_) catch {
@@ -515,11 +857,13 @@ pub fn main() !void {
                 try stdout.print("Collection: {s} ({s})\n", .{ c_.name, c_.path });
                 var docs = qmd.store.getActiveDocumentPaths(&db_, c_.name) catch continue;
                 defer {
+                    for (docs.paths.items) |p| std.heap.page_allocator.free(p);
+                    for (docs.titles.items) |t| std.heap.page_allocator.free(t);
                     docs.paths.deinit(std.heap.page_allocator);
                     docs.titles.deinit(std.heap.page_allocator);
                 }
                 for (docs.paths.items, docs.titles.items) |path, title| {
-                    try stdout.print("  {s}: {s}\n", .{ path, title });
+                    try stdout.print("  qmd://{s}/{s}: {s}\n", .{ c_.name, path, title });
                 }
             }
         }
@@ -528,7 +872,24 @@ pub fn main() !void {
     }
 
     if (std.mem.eql(u8, cmd, "cleanup")) {
-        try stdout.writeAll("Cleanup complete.\n");
+        var db_path_buf: [256]u8 = undefined;
+        const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}", .{DB_PATH});
+        var db_ = qmd.db.Db.open(db_path) catch {
+            try stdout.writeAll("Error: Database not found.\n");
+            try stdout.flush();
+            return;
+        };
+        defer db_.close();
+
+        const stats = qmd.store.cleanupOrphans(&db_) catch {
+            try stdout.writeAll("Cleanup failed.\n");
+            try stdout.flush();
+            return;
+        };
+
+        qmd.store.vacuum(&db_) catch {};
+
+        try stdout.print("Cleanup complete. Removed content: {d}, vectors: {d}\n", .{ stats.removed_content, stats.removed_vectors });
         try stdout.flush();
         return;
     }

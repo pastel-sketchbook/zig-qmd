@@ -79,11 +79,15 @@ pub fn findActiveDocument(db_: *db.Db, collection: []const u8, path: []const u8)
     const hsh = stmt.columnText(2);
     const d = stmt.columnText(3);
 
+    const title_copy = if (ttl) |t| try std.heap.page_allocator.dupe(u8, std.mem.span(t)) else try std.heap.page_allocator.dupe(u8, "");
+    const hash_copy = if (hsh) |h| try std.heap.page_allocator.dupe(u8, std.mem.span(h)) else try std.heap.page_allocator.dupe(u8, "");
+    const doc_copy = if (d) |doc_txt| try std.heap.page_allocator.dupe(u8, std.mem.span(doc_txt)) else try std.heap.page_allocator.dupe(u8, "");
+
     return .{
         .id = stmt.columnInt(0),
-        .title = if (ttl) |t| std.mem.span(t) else "",
-        .hash = if (hsh) |h| std.mem.span(h) else "",
-        .doc = if (d) |doc| std.mem.span(doc) else "",
+        .title = title_copy,
+        .hash = hash_copy,
+        .doc = doc_copy,
     };
 }
 
@@ -118,8 +122,8 @@ pub fn getActiveDocumentPaths(db_: *db.Db, collection: []const u8) StoreError!st
     while (try stmt.step()) {
         const pth = stmt.columnText(0);
         const ttl = stmt.columnText(1);
-        const path = if (pth) |p| std.mem.span(p) else "";
-        const title = if (ttl) |t| std.mem.span(t) else "";
+        const path = if (pth) |p| try std.heap.page_allocator.dupe(u8, std.mem.span(p)) else try std.heap.page_allocator.dupe(u8, "");
+        const title = if (ttl) |t| try std.heap.page_allocator.dupe(u8, std.mem.span(t)) else try std.heap.page_allocator.dupe(u8, "");
         try paths.append(std.heap.page_allocator, path);
         try titles.append(std.heap.page_allocator, title);
     }
@@ -184,6 +188,50 @@ pub fn upsertContentVector(
     _ = try stmt.step();
 }
 
+pub const CleanupStats = struct {
+    removed_content: i64,
+    removed_vectors: i64,
+};
+
+pub fn cleanupOrphans(db_: *db.Db) StoreError!CleanupStats {
+    const orphan_content = try countOrphanContent(db_);
+    const orphan_vectors = try countOrphanVectors(db_);
+
+    try db_.exec(
+        "DELETE FROM content WHERE hash NOT IN (SELECT DISTINCT hash FROM documents WHERE active = 1)",
+    );
+    try db_.exec(
+        "DELETE FROM content_vectors WHERE hash NOT IN (SELECT DISTINCT hash FROM documents WHERE active = 1)",
+    );
+
+    return .{
+        .removed_content = orphan_content,
+        .removed_vectors = orphan_vectors,
+    };
+}
+
+pub fn vacuum(db_: *db.Db) StoreError!void {
+    try db_.exec("VACUUM");
+}
+
+fn countOrphanContent(db_: *db.Db) StoreError!i64 {
+    var stmt = try db_.prepare(
+        "SELECT count(*) FROM content WHERE hash NOT IN (SELECT DISTINCT hash FROM documents WHERE active = 1)",
+    );
+    defer stmt.finalize();
+    if (!try stmt.step()) return 0;
+    return stmt.columnInt(0);
+}
+
+fn countOrphanVectors(db_: *db.Db) StoreError!i64 {
+    var stmt = try db_.prepare(
+        "SELECT count(*) FROM content_vectors WHERE hash NOT IN (SELECT DISTINCT hash FROM documents WHERE active = 1)",
+    );
+    defer stmt.finalize();
+    if (!try stmt.step()) return 0;
+    return stmt.columnInt(0);
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -234,6 +282,11 @@ test "findActiveDocument returns document" {
     try insertDocument(&db_, "notes", "test.md", "# Test Doc\n\nHello world");
 
     const doc = try findActiveDocument(&db_, "notes", "test.md");
+    defer {
+        std.heap.page_allocator.free(doc.title);
+        std.heap.page_allocator.free(doc.hash);
+        std.heap.page_allocator.free(doc.doc);
+    }
     try std.testing.expectEqualStrings("Test Doc", doc.title);
     try std.testing.expect(doc.id > 0);
 }
@@ -270,6 +323,8 @@ test "getActiveDocumentPaths returns all paths" {
 
     const result = try getActiveDocumentPaths(&db_, "notes");
     defer {
+        for (result.paths.items) |p| std.heap.page_allocator.free(p);
+        for (result.titles.items) |t| std.heap.page_allocator.free(t);
         result.paths.deinit();
         result.titles.deinit();
     }
@@ -295,4 +350,35 @@ test "upsertContentVector stores embedding JSON" {
     const embedding = stmt.columnText(1).?;
     try std.testing.expectEqualStrings("test-model", std.mem.span(model));
     try std.testing.expect(std.mem.indexOf(u8, std.mem.span(embedding), "0.1") != null);
+}
+
+test "cleanupOrphans removes inactive content and vectors" {
+    var db_ = try db.Db.open(":memory:");
+    defer db_.close();
+    try db.initSchema(&db_);
+
+    try insertDocument(&db_, "notes", "keep.md", "# Keep\n\nactive");
+    try insertDocument(&db_, "notes", "drop.md", "# Drop\n\ninactive");
+
+    const keep_hash = try findActiveDocumentHash(&db_, "notes", "keep.md");
+    const drop_hash = try findActiveDocumentHash(&db_, "notes", "drop.md");
+
+    try upsertContentVector(&db_, keep_hash[0..], "m", &.{ 0.1, 0.2 }, std.testing.allocator);
+    try upsertContentVector(&db_, drop_hash[0..], "m", &.{ 0.3, 0.4 }, std.testing.allocator);
+
+    try deactivateDocument(&db_, "notes", "drop.md");
+
+    const stats = try cleanupOrphans(&db_);
+    try std.testing.expect(stats.removed_content >= 1);
+    try std.testing.expect(stats.removed_vectors >= 1);
+
+    var stmt = try db_.prepare("SELECT count(*) FROM content");
+    defer stmt.finalize();
+    try std.testing.expect(try stmt.step());
+    try std.testing.expectEqual(@as(i64, 1), stmt.columnInt(0));
+
+    stmt = try db_.prepare("SELECT count(*) FROM content_vectors");
+    defer stmt.finalize();
+    try std.testing.expect(try stmt.step());
+    try std.testing.expectEqual(@as(i64, 1), stmt.columnInt(0));
 }
