@@ -179,11 +179,19 @@ pub fn hybridSearch(
     collection: ?[]const u8,
     options: HybridOptions,
 ) !HybridResult {
+    if (is_aborted(options.abort_signal)) {
+        return .{ .results = try std.ArrayList(SearchResult).initCapacity(std.heap.page_allocator, 0), .fts_count = 0, .vec_count = 0 };
+    }
+
     var effective_query = query;
     var expanded_query_owned: ?[]const u8 = null;
     defer if (expanded_query_owned) |q| std.heap.page_allocator.free(q);
 
     if (options.enable_query_expansion) {
+        if (is_aborted(options.abort_signal)) {
+            return .{ .results = try std.ArrayList(SearchResult).initCapacity(std.heap.page_allocator, 0), .fts_count = 0, .vec_count = 0 };
+        }
+
         const bin_path = std.process.getEnvVarOwned(std.heap.page_allocator, "QMD_LLAMA_EMBED_BIN") catch null;
         defer if (bin_path) |p| std.heap.page_allocator.free(p);
         const model_path = std.process.getEnvVarOwned(std.heap.page_allocator, "QMD_LLAMA_MODEL") catch null;
@@ -219,6 +227,9 @@ pub fn hybridSearch(
 
     var vec_scored: []ScoredResult = &.{};
     if (options.enable_vector) {
+        if (is_aborted(options.abort_signal)) {
+            return .{ .results = try std.ArrayList(SearchResult).initCapacity(std.heap.page_allocator, 0), .fts_count = 0, .vec_count = 0 };
+        }
         const vec_result = try searchVec(db_, effective_query, collection);
         vec_scored = vec_result.results;
     }
@@ -230,6 +241,9 @@ pub fn hybridSearch(
     var fused = reciprocalRankFusion(&lists, options.rrf_k);
 
     if (options.enable_rerank and fused.len > 1) {
+        if (is_aborted(options.abort_signal)) {
+            return .{ .results = try std.ArrayList(SearchResult).initCapacity(std.heap.page_allocator, 0), .fts_count = 0, .vec_count = 0 };
+        }
         fused = try rerankByEmbedding(db_, effective_query, fused);
     }
 
@@ -259,10 +273,16 @@ pub const HybridOptions = struct {
     enable_vector: bool = false,
     enable_query_expansion: bool = false,
     enable_rerank: bool = false,
+    abort_signal: ?*const std.atomic.Value(bool) = null,
     rrf_k: f64 = RRF_K,
     max_results: usize = 20,
     min_score: f64 = 0.0,
 };
+
+fn is_aborted(signal: ?*const std.atomic.Value(bool)) bool {
+    if (signal) |s| return s.load(.monotonic);
+    return false;
+}
 
 fn rerankByEmbedding(db_: *db.Db, query: []const u8, results: []ScoredResult) ![]ScoredResult {
     const allocator = std.heap.page_allocator;
@@ -544,6 +564,22 @@ test "hybridSearch supports rerank option" {
     defer result.results.deinit(std.heap.page_allocator);
 
     try std.testing.expect(result.results.items.len > 0);
+}
+
+test "hybridSearch supports abort signal" {
+    var db_ = try db.Db.open(":memory:");
+    defer db_.close();
+    try db.initSchema(&db_);
+
+    try store.insertDocument(&db_, "test", "a.md", "# A\n\nauth flow");
+
+    var aborted = std.atomic.Value(bool).init(true);
+    var result = try hybridSearch(&db_, "auth", null, .{
+        .enable_vector = true,
+        .abort_signal = &aborted,
+    });
+    defer result.results.deinit(std.heap.page_allocator);
+    try std.testing.expectEqual(@as(usize, 0), result.results.items.len);
 }
 
 test "buildFTS5Query parses simple tokens" {
