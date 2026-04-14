@@ -31,7 +31,7 @@ pub const Qmd = struct {
     }
 
     pub fn update(self: *Qmd) !usize {
-        var collections_result = try config.listCollections(&self.db);
+        var collections_result = try config.listCollections(&self.db, self.allocator);
         defer config.freeCollections(&collections_result);
 
         var total_indexed: usize = 0;
@@ -144,7 +144,7 @@ test "ZMD open init add update search get" {
     defer engine.close();
 
     try config.addCollection(&engine.db, "notes", "/tmp");
-    var cols = try config.listCollections(&engine.db);
+    var cols = try config.listCollections(&engine.db, allocator);
     defer config.freeCollections(&cols);
     try std.testing.expect(cols.collections.items.len >= 1);
 

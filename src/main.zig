@@ -209,7 +209,7 @@ pub fn main() !void {
         }
 
         if (std.mem.eql(u8, subcmd, "list")) {
-            var result = qmd.config.listCollections(&db_) catch {
+            var result = qmd.config.listCollections(&db_, allocator) catch {
                 try stdout.writeAll("Failed to list collections\n");
                 try stdout.flush();
                 return;
@@ -275,7 +275,7 @@ pub fn main() !void {
         try stdout.writeAll("Schema initialized.\n");
         try stdout.flush();
 
-        var collections_result = qmd.config.listCollections(&db_) catch {
+        var collections_result = qmd.config.listCollections(&db_, allocator) catch {
             try stdout.writeAll("Error: Failed to list collections\n");
             try stdout.flush();
             return;
@@ -1061,7 +1061,7 @@ pub fn main() !void {
                 try stdout.print("  zmd://{s}/{s}: {s}\n", .{ c, path, title });
             }
         } else {
-            var result = qmd.config.listCollections(&db_) catch {
+            var result = qmd.config.listCollections(&db_, allocator) catch {
                 try stdout.writeAll("Failed to list collections.\n");
                 try stdout.flush();
                 return;
