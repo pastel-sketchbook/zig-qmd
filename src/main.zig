@@ -116,17 +116,19 @@ fn extractSnippet(allocator: std.mem.Allocator, query: []const u8, doc: []const 
     var tok_it = std.mem.tokenizeScalar(u8, query, ' ');
     const token = tok_it.next() orelse return allocator.dupe(u8, doc[0..@min(doc.len, 180)]);
 
-    const lower_doc = try allocator.alloc(u8, doc.len);
-    defer allocator.free(lower_doc);
-    for (doc, 0..) |ch, i| lower_doc[i] = std.ascii.toLower(ch);
+    // Try to find the token in the document using a UTF-8-aware,
+    // case-insensitive search.  For CJK characters (which have no case),
+    // std.ascii.toLower is a no-op on high bytes so the comparison works
+    // correctly only when we compare at the codepoint level.
+    const idx = utf8IndexOfInsensitive(doc, token) orelse 0;
 
-    const lower_tok = try allocator.alloc(u8, token.len);
-    defer allocator.free(lower_tok);
-    for (token, 0..) |ch, i| lower_tok[i] = std.ascii.toLower(ch);
+    // Snap start/end to UTF-8 codepoint boundaries so we never slice
+    // in the middle of a multi-byte character.
+    const raw_start: usize = if (idx > 60) idx - 60 else 0;
+    const start = snapBackToCodepoint(doc, raw_start);
 
-    const idx = std.mem.indexOf(u8, lower_doc, lower_tok) orelse 0;
-    const start: usize = if (idx > 60) idx - 60 else 0;
-    const end = @min(doc.len, idx + token.len + 140);
+    const raw_end = @min(doc.len, idx + token.len + 140);
+    const end = snapForwardToCodepoint(doc, raw_end);
 
     var out = try std.ArrayList(u8).initCapacity(allocator, end - start + 8);
     defer out.deinit(allocator);
@@ -134,6 +136,49 @@ fn extractSnippet(allocator: std.mem.Allocator, query: []const u8, doc: []const 
     try out.appendSlice(allocator, doc[start..end]);
     if (end < doc.len) try out.appendSlice(allocator, "...");
     return out.toOwnedSlice(allocator);
+}
+
+/// Find `needle` in `haystack` using a byte-level comparison that is
+/// case-insensitive for ASCII while leaving non-ASCII bytes (CJK, Hangul,
+/// etc.) compared exactly.  Returns the byte offset of the first match.
+fn utf8IndexOfInsensitive(haystack: []const u8, needle: []const u8) ?usize {
+    if (needle.len == 0) return 0;
+    if (needle.len > haystack.len) return null;
+
+    outer: for (0..haystack.len - needle.len + 1) |i| {
+        for (0..needle.len) |j| {
+            const a = haystack[i + j];
+            const b = needle[j];
+            // Only apply toLower for ASCII bytes (< 0x80).
+            // Non-ASCII bytes (part of UTF-8 multibyte sequences) are
+            // compared exactly — CJK/Hangul has no case distinction.
+            const la = if (a < 0x80) std.ascii.toLower(a) else a;
+            const lb = if (b < 0x80) std.ascii.toLower(b) else b;
+            if (la != lb) continue :outer;
+        }
+        return i;
+    }
+    return null;
+}
+
+/// Snap a byte offset backward to the start of the UTF-8 codepoint
+/// containing that offset.  Continuation bytes (10xxxxxx) are skipped.
+fn snapBackToCodepoint(data: []const u8, pos: usize) usize {
+    var p = pos;
+    while (p > 0 and (data[p] & 0xC0) == 0x80) {
+        p -= 1;
+    }
+    return p;
+}
+
+/// Snap a byte offset forward to the start of the next codepoint (or to
+/// data.len).  If `pos` already sits on a codepoint boundary, returns `pos`.
+fn snapForwardToCodepoint(data: []const u8, pos: usize) usize {
+    var p = pos;
+    while (p < data.len and (data[p] & 0xC0) == 0x80) {
+        p += 1;
+    }
+    return p;
 }
 
 fn make_embedding_engine(allocator: std.mem.Allocator) ?qmd.llm.LlamaEmbedding {
