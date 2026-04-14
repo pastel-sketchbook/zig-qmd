@@ -50,11 +50,41 @@ pub fn handleize(path: []const u8, out: *[SHA256_HEX_LEN]u8) void {
 
 pub fn extractTitle(content: []const u8) []const u8 {
     var lines = std.mem.splitScalar(u8, content, '\n');
-    const first = lines.first();
-    if (std.mem.startsWith(u8, first, "# ")) {
-        return std.mem.trim(u8, first[2..], &.{ ' ', '\t' });
+
+    var in_frontmatter = false;
+    var frontmatter_started = false;
+
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, &.{ ' ', '\t', '\r' });
+
+        if (!frontmatter_started and std.mem.eql(u8, trimmed, "---")) {
+            frontmatter_started = true;
+            in_frontmatter = true;
+            continue;
+        }
+
+        if (in_frontmatter) {
+            if (std.mem.eql(u8, trimmed, "---")) {
+                in_frontmatter = false;
+            }
+            continue;
+        }
+
+        if (trimmed.len == 0) continue;
+
+        // Markdown heading (supports multiple '#')
+        var i: usize = 0;
+        while (i < trimmed.len and trimmed[i] == '#') : (i += 1) {}
+        if (i > 0 and i < trimmed.len and trimmed[i] == ' ') {
+            const heading = std.mem.trim(u8, trimmed[i + 1 ..], &.{ ' ', '\t' });
+            if (heading.len > 0) return heading;
+            continue;
+        }
+
+        return trimmed;
     }
-    return std.mem.trim(u8, first, &.{ ' ', '\t' });
+
+    return "Untitled";
 }
 
 pub fn insertContent(db_: *db.Db, content: []const u8) StoreError![SHA256_HEX_LEN]u8 {
@@ -277,6 +307,23 @@ test "extractTitle from heading" {
 test "extractTitle from plain first line" {
     const title = extractTitle("Plain title\n\nContent");
     try std.testing.expectEqualStrings("Plain title", title);
+}
+
+test "extractTitle skips leading blank lines" {
+    const title = extractTitle("\n\n# Login Flow\n\nContent");
+    try std.testing.expectEqualStrings("Login Flow", title);
+}
+
+test "extractTitle skips yaml frontmatter" {
+    const title = extractTitle(
+        "---\nlayout: post\ntags: [auth]\n---\n\n# Authentication\nBody",
+    );
+    try std.testing.expectEqualStrings("Authentication", title);
+}
+
+test "extractTitle falls back to Untitled" {
+    const title = extractTitle("\n\n\n");
+    try std.testing.expectEqualStrings("Untitled", title);
 }
 
 test "insertContent and retrieve" {
