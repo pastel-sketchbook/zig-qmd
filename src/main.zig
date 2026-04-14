@@ -429,7 +429,7 @@ pub fn main() !void {
         };
         defer db_.close();
 
-        var result = qmd.search.hybridSearch(&db_, query_text, null, .{
+        var result = qmd.search.hybridSearch(&db_, allocator, query_text, null, .{
             .enable_vector = true,
             .enable_query_expansion = enable_expand,
             .enable_rerank = enable_rerank,
@@ -525,7 +525,7 @@ pub fn main() !void {
         };
         defer db_.close();
 
-        var result = qmd.search.hybridSearch(&db_, query_text, null, .{
+        var result = qmd.search.hybridSearch(&db_, allocator, query_text, null, .{
             .enable_vector = true,
             .max_results = 5,
         }) catch {
@@ -656,7 +656,7 @@ pub fn main() !void {
         };
         defer db_.close();
 
-        var result = qmd.search.searchFTS(&db_, query_text, collection) catch {
+        var result = qmd.search.searchFTS(&db_, allocator, query_text, collection) catch {
             try stdout.writeAll("Search failed\n");
             try stdout.flush();
             return;
@@ -742,7 +742,7 @@ pub fn main() !void {
         };
         defer db_.close();
 
-        const result = qmd.search.searchVec(&db_, query_text, null) catch {
+        const result = qmd.search.searchVec(&db_, allocator, query_text, null) catch {
             try stdout.writeAll("Vector search failed\n");
             try stdout.flush();
             return;

@@ -94,11 +94,11 @@ pub const Qmd = struct {
     }
 
     pub fn search_fts(self: *Qmd, query_text: []const u8, collection: ?[]const u8) !search.SearchResults {
-        return search.searchFTS(&self.db, query_text, collection);
+        return search.searchFTS(&self.db, self.allocator, query_text, collection);
     }
 
     pub fn query_hybrid(self: *Qmd, query_text: []const u8, options: search.HybridOptions) !search.HybridResult {
-        return search.hybridSearch(&self.db, query_text, null, options);
+        return search.hybridSearch(&self.db, self.allocator, query_text, null, options);
     }
 
     pub fn get(self: *Qmd, collection: []const u8, path: []const u8) !store.ActiveDocument {
@@ -150,7 +150,7 @@ test "Qmd open init add update search get" {
 
     try store.insertDocument(&engine.db, "notes", "a.md", "# A\n\nhello auth");
     var res = try engine.search_fts("auth", null);
-    defer res.deinit(std.heap.page_allocator);
+    defer res.deinit(allocator);
     try std.testing.expect(res.results.items.len >= 1);
 
     const doc = try engine.get("notes", "a.md");

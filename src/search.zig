@@ -56,10 +56,12 @@ pub fn buildFTS5Query(input: []const u8) ![]u8 {
 
 pub fn searchFTS(
     db_: *db.Db,
+    allocator: std.mem.Allocator,
     query: []const u8,
     collection: ?[]const u8,
 ) !SearchResults {
     const fts_query = try buildFTS5Query(query);
+    defer std.heap.page_allocator.free(fts_query);
 
     const base_sql = if (collection != null)
         "WITH ranked AS (SELECT d.id, d.collection, d.path, d.title, d.hash, bm25(documents_fts, 1.5, 4.0, 1.0) as score FROM documents_fts JOIN documents d ON documents_fts.rowid = d.id WHERE documents_fts MATCH ? AND d.collection = ?) SELECT id, collection, path, title, hash, score FROM ranked WHERE score < 0 ORDER BY score LIMIT 100"
@@ -72,10 +74,10 @@ pub fn searchFTS(
     try stmt.bindText(1, fts_query);
     if (collection) |col| try stmt.bindText(2, col);
 
-    var results = try std.ArrayList(SearchResult).initCapacity(std.heap.page_allocator, 0);
+    var results = try std.ArrayList(SearchResult).initCapacity(allocator, 0);
     errdefer {
-        freeSearchResultSlice(results.items, std.heap.page_allocator);
-        results.deinit(std.heap.page_allocator);
+        freeSearchResultSlice(results.items, allocator);
+        results.deinit(allocator);
     }
 
     while (try stmt.step()) {
@@ -87,12 +89,12 @@ pub fn searchFTS(
         const ttl = stmt.columnText(3);
         const hsh = stmt.columnText(4);
 
-        const col_str = if (col) |c| try std.heap.page_allocator.dupe(u8, std.mem.span(c)) else try std.heap.page_allocator.dupe(u8, "");
-        const pth_str = if (pth) |p| try std.heap.page_allocator.dupe(u8, std.mem.span(p)) else try std.heap.page_allocator.dupe(u8, "");
-        const ttl_str = if (ttl) |t| try std.heap.page_allocator.dupe(u8, std.mem.span(t)) else try std.heap.page_allocator.dupe(u8, "");
-        const hsh_str = if (hsh) |h| try std.heap.page_allocator.dupe(u8, std.mem.span(h)) else try std.heap.page_allocator.dupe(u8, "");
+        const col_str = if (col) |c| try allocator.dupe(u8, std.mem.span(c)) else try allocator.dupe(u8, "");
+        const pth_str = if (pth) |p| try allocator.dupe(u8, std.mem.span(p)) else try allocator.dupe(u8, "");
+        const ttl_str = if (ttl) |t| try allocator.dupe(u8, std.mem.span(t)) else try allocator.dupe(u8, "");
+        const hsh_str = if (hsh) |h| try allocator.dupe(u8, std.mem.span(h)) else try allocator.dupe(u8, "");
 
-        try results.append(std.heap.page_allocator, .{
+        try results.append(allocator, .{
             .id = stmt.columnInt(0),
             .collection = col_str,
             .path = pth_str,
@@ -201,38 +203,39 @@ fn freeScoredResultSlice(items: []ScoredResult, allocator: std.mem.Allocator) vo
 
 pub fn hybridSearch(
     db_: *db.Db,
+    allocator: std.mem.Allocator,
     query: []const u8,
     collection: ?[]const u8,
     options: HybridOptions,
 ) !HybridResult {
     if (is_aborted(options.abort_signal)) {
-        return .{ .results = try std.ArrayList(SearchResult).initCapacity(std.heap.page_allocator, 0), .fts_count = 0, .vec_count = 0 };
+        return .{ .results = try std.ArrayList(SearchResult).initCapacity(allocator, 0), .fts_count = 0, .vec_count = 0 };
     }
 
     var effective_query = query;
     var expanded_query_owned: ?[]const u8 = null;
-    defer if (expanded_query_owned) |q| std.heap.page_allocator.free(q);
+    defer if (expanded_query_owned) |q| allocator.free(q);
 
     if (options.enable_query_expansion) {
         if (is_aborted(options.abort_signal)) {
-            return .{ .results = try std.ArrayList(SearchResult).initCapacity(std.heap.page_allocator, 0), .fts_count = 0, .vec_count = 0 };
+            return .{ .results = try std.ArrayList(SearchResult).initCapacity(allocator, 0), .fts_count = 0, .vec_count = 0 };
         }
 
-        const bin_path = std.process.getEnvVarOwned(std.heap.page_allocator, "QMD_LLAMA_EMBED_BIN") catch null;
-        defer if (bin_path) |p| std.heap.page_allocator.free(p);
-        const model_path = std.process.getEnvVarOwned(std.heap.page_allocator, "QMD_LLAMA_MODEL") catch null;
-        defer if (model_path) |p| std.heap.page_allocator.free(p);
+        const bin_path = std.process.getEnvVarOwned(allocator, "QMD_LLAMA_EMBED_BIN") catch null;
+        defer if (bin_path) |p| allocator.free(p);
+        const model_path = std.process.getEnvVarOwned(allocator, "QMD_LLAMA_MODEL") catch null;
+        defer if (model_path) |p| allocator.free(p);
 
         const model_key = if (model_path) |m| m else "heuristic";
         const cache_key = llm.buildCacheKey("expand", model_key, query);
-        const cached = llm.cacheGet(db_, cache_key[0..], std.heap.page_allocator) catch null;
+        const cached = llm.cacheGet(db_, cache_key[0..], allocator) catch null;
         if (cached) |q_cached| {
             expanded_query_owned = q_cached;
             effective_query = q_cached;
         }
 
         const expanded = if (cached == null)
-            (llm.expandQueryWithModel(std.heap.page_allocator, query, bin_path, model_path) catch null)
+            (llm.expandQueryWithModel(allocator, query, bin_path, model_path) catch null)
         else
             null;
         if (expanded) |q| {
@@ -244,27 +247,27 @@ pub fn hybridSearch(
         }
     }
 
-    var fts_result = try searchFTS(db_, effective_query, collection);
-    defer fts_result.deinit(std.heap.page_allocator);
+    var fts_result = try searchFTS(db_, allocator, effective_query, collection);
+    defer fts_result.deinit(allocator);
 
-    var fts_scored = try std.ArrayList(ScoredResult).initCapacity(std.heap.page_allocator, fts_result.results.items.len);
-    errdefer fts_scored.deinit(std.heap.page_allocator);
+    var fts_scored = try std.ArrayList(ScoredResult).initCapacity(allocator, fts_result.results.items.len);
+    errdefer fts_scored.deinit(allocator);
 
     for (fts_result.results.items) |r| {
-        try fts_scored.append(std.heap.page_allocator, .{ .id = r.id, .collection = r.collection, .path = r.path, .title = r.title, .hash = r.hash, .score = r.score });
+        try fts_scored.append(allocator, .{ .id = r.id, .collection = r.collection, .path = r.path, .title = r.title, .hash = r.hash, .score = r.score });
     }
 
     var vec_scored: []ScoredResult = &.{};
     if (options.enable_vector) {
         if (is_aborted(options.abort_signal)) {
-            return .{ .results = try std.ArrayList(SearchResult).initCapacity(std.heap.page_allocator, 0), .fts_count = 0, .vec_count = 0 };
+            return .{ .results = try std.ArrayList(SearchResult).initCapacity(allocator, 0), .fts_count = 0, .vec_count = 0 };
         }
-        const vec_result = try searchVec(db_, effective_query, collection);
+        const vec_result = try searchVec(db_, allocator, effective_query, collection);
         vec_scored = vec_result.results;
     }
     defer {
-        freeScoredResultSlice(vec_scored, std.heap.page_allocator);
-        if (vec_scored.len > 0) std.heap.page_allocator.free(vec_scored);
+        freeScoredResultSlice(vec_scored, allocator);
+        if (vec_scored.len > 0) allocator.free(vec_scored);
     }
 
     var lists: [2][]ScoredResult = undefined;
@@ -272,21 +275,21 @@ pub fn hybridSearch(
     lists[1] = vec_scored;
 
     var fused = try reciprocalRankFusion(&lists, options.rrf_k);
-    defer std.heap.page_allocator.free(fused);
+    defer allocator.free(fused);
 
     if (options.enable_rerank and fused.len > 1) {
         if (is_aborted(options.abort_signal)) {
-            return .{ .results = try std.ArrayList(SearchResult).initCapacity(std.heap.page_allocator, 0), .fts_count = 0, .vec_count = 0 };
+            return .{ .results = try std.ArrayList(SearchResult).initCapacity(allocator, 0), .fts_count = 0, .vec_count = 0 };
         }
-        const reranked = try rerankByEmbedding(db_, effective_query, fused);
-        std.heap.page_allocator.free(fused);
+        const reranked = try rerankByEmbedding(db_, allocator, effective_query, fused);
+        allocator.free(fused);
         fused = reranked;
     }
 
-    var final_results = try std.ArrayList(SearchResult).initCapacity(std.heap.page_allocator, @min(fused.len, options.max_results));
+    var final_results = try std.ArrayList(SearchResult).initCapacity(allocator, @min(fused.len, options.max_results));
     errdefer {
-        freeSearchResultSlice(final_results.items, std.heap.page_allocator);
-        final_results.deinit(std.heap.page_allocator);
+        freeSearchResultSlice(final_results.items, allocator);
+        final_results.deinit(allocator);
     }
 
     for (fused[0..@min(fused.len, options.max_results)]) |r| {
@@ -295,19 +298,19 @@ pub fn hybridSearch(
         if (std.mem.eql(u8, title, "")) {
             const doc = store.findActiveDocument(db_, r.collection, r.path) catch continue;
             defer {
-                std.heap.page_allocator.free(doc.title);
-                std.heap.page_allocator.free(doc.hash);
-                std.heap.page_allocator.free(doc.doc);
+                allocator.free(doc.title);
+                allocator.free(doc.hash);
+                allocator.free(doc.doc);
             }
             title = doc.title;
             hash = doc.hash;
         }
-        try final_results.append(std.heap.page_allocator, .{
+        try final_results.append(allocator, .{
             .id = r.id,
-            .collection = try std.heap.page_allocator.dupe(u8, r.collection),
-            .path = try std.heap.page_allocator.dupe(u8, r.path),
-            .title = try std.heap.page_allocator.dupe(u8, title),
-            .hash = try std.heap.page_allocator.dupe(u8, hash),
+            .collection = try allocator.dupe(u8, r.collection),
+            .path = try allocator.dupe(u8, r.path),
+            .title = try allocator.dupe(u8, title),
+            .hash = try allocator.dupe(u8, hash),
             .score = r.score,
         });
     }
@@ -330,9 +333,8 @@ fn is_aborted(signal: ?*const std.atomic.Value(bool)) bool {
     return false;
 }
 
-fn rerankByEmbedding(db_: *db.Db, query: []const u8, results: []ScoredResult) ![]ScoredResult {
-    const allocator = std.heap.page_allocator;
-    const q_emb = try embed_text(query, true);
+fn rerankByEmbedding(db_: *db.Db, allocator: std.mem.Allocator, query: []const u8, results: []ScoredResult) ![]ScoredResult {
+    const q_emb = try embed_text(allocator, query, true);
     defer allocator.free(q_emb);
 
     const bin_path = std.process.getEnvVarOwned(allocator, "QMD_LLAMA_EMBED_BIN") catch null;
@@ -371,7 +373,7 @@ fn rerankByEmbedding(db_: *db.Db, query: []const u8, results: []ScoredResult) ![
         owned_passages[i] = passage_copy;
         passages[i] = passage_copy;
 
-        const d_emb = embed_text(source_text, false) catch q_emb;
+        const d_emb = embed_text(allocator, source_text, false) catch q_emb;
         defer if (d_emb.ptr != q_emb.ptr) allocator.free(d_emb);
 
         const cosine = llm.cosineSimilarity(q_emb, d_emb);
@@ -431,18 +433,19 @@ pub const HybridResult = struct {
 
 pub fn searchVec(
     db_: *db.Db,
+    allocator: std.mem.Allocator,
     query: []const u8,
     collection: ?[]const u8,
 ) !struct { results: []ScoredResult } {
-    const query_embedding = try embed_query(query);
-    defer std.heap.page_allocator.free(query_embedding);
+    const query_embedding = try embed_query(allocator, query);
+    defer allocator.free(query_embedding);
 
     // Try native sqlite-vec first; fallback to JSON cosine path.
-    if (searchVecNative(db_, query_embedding, collection)) |native| {
+    if (searchVecNative(db_, allocator, query_embedding, collection)) |native| {
         return .{ .results = native };
     } else |_| {}
 
-    var best_by_doc = std.AutoHashMap(i64, ScoredResult).init(std.heap.page_allocator);
+    var best_by_doc = std.AutoHashMap(i64, ScoredResult).init(allocator);
     defer best_by_doc.deinit();
 
     var stmt = db_.prepare(
@@ -464,13 +467,13 @@ pub fn searchVec(
         }
         if (emb == null) continue;
 
-        const hash = if (hsh) |h| try std.heap.page_allocator.dupe(u8, std.mem.span(h)) else try std.heap.page_allocator.dupe(u8, "");
-        const col = try std.heap.page_allocator.dupe(u8, col_span);
-        const path = if (pth) |p| try std.heap.page_allocator.dupe(u8, std.mem.span(p)) else try std.heap.page_allocator.dupe(u8, "");
-        const title = if (ttl) |t| try std.heap.page_allocator.dupe(u8, std.mem.span(t)) else try std.heap.page_allocator.dupe(u8, "");
+        const hash = if (hsh) |h| try allocator.dupe(u8, std.mem.span(h)) else try allocator.dupe(u8, "");
+        const col = try allocator.dupe(u8, col_span);
+        const path = if (pth) |p| try allocator.dupe(u8, std.mem.span(p)) else try allocator.dupe(u8, "");
+        const title = if (ttl) |t| try allocator.dupe(u8, std.mem.span(t)) else try allocator.dupe(u8, "");
 
-        const doc_embedding = parse_embedding_json_array(std.mem.span(emb.?)) catch continue;
-        defer std.heap.page_allocator.free(doc_embedding);
+        const doc_embedding = parse_embedding_json_array(allocator, std.mem.span(emb.?)) catch continue;
+        defer allocator.free(doc_embedding);
 
         const score = llm.cosineSimilarity(query_embedding, doc_embedding);
         const candidate = ScoredResult{
@@ -491,12 +494,12 @@ pub fn searchVec(
         }
     }
 
-    var results = try std.ArrayList(ScoredResult).initCapacity(std.heap.page_allocator, best_by_doc.count());
-    errdefer results.deinit(std.heap.page_allocator);
+    var results = try std.ArrayList(ScoredResult).initCapacity(allocator, best_by_doc.count());
+    errdefer results.deinit(allocator);
 
     var it = best_by_doc.iterator();
     while (it.next()) |entry| {
-        try results.append(std.heap.page_allocator, entry.value_ptr.*);
+        try results.append(allocator, entry.value_ptr.*);
     }
 
     std.sort.heap(ScoredResult, results.items, {}, struct {
@@ -508,11 +511,11 @@ pub fn searchVec(
     return .{ .results = results.items };
 }
 
-fn searchVecNative(db_: *db.Db, query_embedding: []const f32, collection: ?[]const u8) ![]ScoredResult {
-    const query_json = try encode_embedding_json(std.heap.page_allocator, query_embedding);
-    defer std.heap.page_allocator.free(query_json);
+fn searchVecNative(db_: *db.Db, allocator: std.mem.Allocator, query_embedding: []const f32, collection: ?[]const u8) ![]ScoredResult {
+    const query_json = try encode_embedding_json(allocator, query_embedding);
+    defer allocator.free(query_json);
 
-    var best_by_doc = std.AutoHashMap(i64, ScoredResult).init(std.heap.page_allocator);
+    var best_by_doc = std.AutoHashMap(i64, ScoredResult).init(allocator);
     defer best_by_doc.deinit();
 
     var stmt = try db_.prepare(
@@ -534,10 +537,10 @@ fn searchVecNative(db_: *db.Db, query_embedding: []const f32, collection: ?[]con
             if (!std.mem.eql(u8, col_span, wanted)) continue;
         }
 
-        const hash = if (hsh) |h| try std.heap.page_allocator.dupe(u8, std.mem.span(h)) else try std.heap.page_allocator.dupe(u8, "");
-        const col = try std.heap.page_allocator.dupe(u8, col_span);
-        const path = if (pth) |p| try std.heap.page_allocator.dupe(u8, std.mem.span(p)) else try std.heap.page_allocator.dupe(u8, "");
-        const title = if (ttl) |t| try std.heap.page_allocator.dupe(u8, std.mem.span(t)) else try std.heap.page_allocator.dupe(u8, "");
+        const hash = if (hsh) |h| try allocator.dupe(u8, std.mem.span(h)) else try allocator.dupe(u8, "");
+        const col = try allocator.dupe(u8, col_span);
+        const path = if (pth) |p| try allocator.dupe(u8, std.mem.span(p)) else try allocator.dupe(u8, "");
+        const title = if (ttl) |t| try allocator.dupe(u8, std.mem.span(t)) else try allocator.dupe(u8, "");
 
         const score = 1.0 / (1.0 + dist);
         const candidate = ScoredResult{ .id = id, .collection = col, .path = path, .title = title, .hash = hash, .score = score };
@@ -550,10 +553,10 @@ fn searchVecNative(db_: *db.Db, query_embedding: []const f32, collection: ?[]con
         }
     }
 
-    var results = try std.ArrayList(ScoredResult).initCapacity(std.heap.page_allocator, best_by_doc.count());
+    var results = try std.ArrayList(ScoredResult).initCapacity(allocator, best_by_doc.count());
     var it = best_by_doc.iterator();
     while (it.next()) |entry| {
-        try results.append(std.heap.page_allocator, entry.value_ptr.*);
+        try results.append(allocator, entry.value_ptr.*);
     }
     std.sort.heap(ScoredResult, results.items, {}, struct {
         fn less(_: void, a: ScoredResult, b: ScoredResult) bool {
@@ -576,12 +579,11 @@ fn encode_embedding_json(allocator: std.mem.Allocator, embedding: []const f32) !
     return out.toOwnedSlice(allocator);
 }
 
-fn embed_query(query: []const u8) ![]f32 {
-    return embed_text(query, true);
+fn embed_query(allocator: std.mem.Allocator, query: []const u8) ![]f32 {
+    return embed_text(allocator, query, true);
 }
 
-fn embed_text(text: []const u8, is_query: bool) ![]f32 {
-    const allocator = std.heap.page_allocator;
+fn embed_text(allocator: std.mem.Allocator, text: []const u8, is_query: bool) ![]f32 {
     const formatted = if (is_query)
         try llm.formatQueryForEmbedding(allocator, text)
     else
@@ -613,8 +615,7 @@ fn embed_text(text: []const u8, is_query: bool) ![]f32 {
     return fallback.embed(formatted, allocator);
 }
 
-fn parse_embedding_json_array(json: []const u8) ![]f32 {
-    const allocator = std.heap.page_allocator;
+fn parse_embedding_json_array(allocator: std.mem.Allocator, json: []const u8) ![]f32 {
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, json, .{}) catch return error.InvalidJson;
     defer parsed.deinit();
 
@@ -636,8 +637,8 @@ test "embed_query uses real model when env is set" {
     const maybe_model = std.process.getEnvVarOwned(allocator, "QMD_REAL_GGUF_MODEL");
     if (maybe_model) |model| {
         defer allocator.free(model);
-        const emb = try embed_query("oauth sign in token");
-        defer std.heap.page_allocator.free(emb);
+        const emb = try embed_query(allocator, "oauth sign in token");
+        defer allocator.free(emb);
         try std.testing.expect(emb.len > 10);
     } else |_| {
         // Skip when no real model is configured.
@@ -672,7 +673,7 @@ test "hybridSearch with FTS only" {
     try store.insertDocument(&db_, "test", "a.md", "# Auth\nLogin flow");
     try store.insertDocument(&db_, "test", "b.md", "# Setup\nInstall");
 
-    var result = try hybridSearch(&db_, "auth", null, .{ .enable_vector = false });
+    var result = try hybridSearch(&db_, std.heap.page_allocator, "auth", null, .{ .enable_vector = false });
     defer result.deinit(std.heap.page_allocator);
 
     try std.testing.expect(result.fts_count > 0);
@@ -700,7 +701,7 @@ test "searchVec uses stored vectors and ranks by cosine" {
     try store.upsertContentVector(&db_, doc_a.hash, "test", q_emb, std.heap.page_allocator);
     try store.upsertContentVector(&db_, doc_b.hash, "test", b_emb, std.heap.page_allocator);
 
-    const result = try searchVec(&db_, "auth", null);
+    const result = try searchVec(&db_, std.heap.page_allocator, "auth", null);
     try std.testing.expect(result.results.len >= 2);
     try std.testing.expect(result.results[0].score >= result.results[1].score);
 }
@@ -713,7 +714,7 @@ test "hybridSearch supports query expansion option" {
     try store.insertDocument(&db_, "test", "a.md", "# Login\nHow to authenticate users");
     try store.insertDocument(&db_, "test", "b.md", "# Cooking\nHow to boil pasta");
 
-    var result = try hybridSearch(&db_, "how login?", null, .{
+    var result = try hybridSearch(&db_, std.heap.page_allocator, "how login?", null, .{
         .enable_vector = true,
         .enable_query_expansion = true,
         .enable_rerank = false,
@@ -732,7 +733,7 @@ test "hybridSearch supports rerank option" {
     try store.insertDocument(&db_, "test", "a.md", "# Authentication\nOAuth token login");
     try store.insertDocument(&db_, "test", "b.md", "# Recipe\nPasta cooking instructions");
 
-    var result = try hybridSearch(&db_, "oauth login", null, .{
+    var result = try hybridSearch(&db_, std.heap.page_allocator, "oauth login", null, .{
         .enable_vector = true,
         .enable_query_expansion = false,
         .enable_rerank = true,
@@ -751,7 +752,7 @@ test "hybridSearch supports abort signal" {
     try store.insertDocument(&db_, "test", "a.md", "# A\n\nauth flow");
 
     var aborted = std.atomic.Value(bool).init(true);
-    var result = try hybridSearch(&db_, "auth", null, .{
+    var result = try hybridSearch(&db_, std.heap.page_allocator, "auth", null, .{
         .enable_vector = true,
         .abort_signal = &aborted,
     });

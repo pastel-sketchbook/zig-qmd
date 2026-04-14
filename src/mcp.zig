@@ -172,7 +172,7 @@ pub const McpServer = struct {
 
         if (std.mem.eql(u8, name, "query")) {
             const query_text = extractParam(args_json, "query") orelse "";
-            var result = search.hybridSearch(&db_, query_text, null, .{
+            var result = search.hybridSearch(&db_, std.heap.page_allocator, query_text, null, .{
                 .enable_vector = true,
                 .max_results = 5,
             }) catch return std.heap.page_allocator.dupe(u8, "{\"content\":[{\"type\":\"text\",\"text\":\"query failed\"}]}") catch McpError.InvalidParams;
@@ -189,7 +189,7 @@ pub const McpServer = struct {
         if (std.mem.eql(u8, name, "search")) {
             const query_text = extractParam(args_json, "query") orelse "";
             const collection = extractParam(args_json, "collection");
-            var result = search.searchFTS(&db_, query_text, collection) catch return std.heap.page_allocator.dupe(u8, "{\"content\":[{\"type\":\"text\",\"text\":\"search failed\"}]}") catch McpError.InvalidParams;
+            var result = search.searchFTS(&db_, std.heap.page_allocator, query_text, collection) catch return std.heap.page_allocator.dupe(u8, "{\"content\":[{\"type\":\"text\",\"text\":\"search failed\"}]}") catch McpError.InvalidParams;
             defer result.deinit(std.heap.page_allocator);
 
             var text = std.ArrayList(u8).initCapacity(std.heap.page_allocator, 256) catch return McpError.InvalidParams;
