@@ -341,6 +341,23 @@ pub fn main() !void {
         defer qmd.config.freeCollections(&collections_result);
 
         var total_indexed: usize = 0;
+        var total_skipped: usize = 0;
+
+        // Hoist embedding engine creation outside the document loop (A3/A4).
+        // This avoids per-document env var reads, file existence checks, and allocations.
+        var embedding_engine: ?qmd.llm.LlamaEmbedding = make_embedding_engine(allocator);
+        defer if (embedding_engine) |*e| e.deinit();
+        const use_real_engine = embedding_engine != null;
+
+        var fallback_engine: ?qmd.llm.LlamaCpp = if (!use_real_engine)
+            qmd.llm.LlamaCpp.init("/dev/null", allocator) catch null
+        else
+            null;
+        defer if (fallback_engine) |*f| f.deinit();
+
+        // Reusable tree-sitter parser — created once, used for all documents (B6).
+        var ast_chunker = qmd.ast.AstChunker.init(allocator, "markdown") catch null;
+        defer if (ast_chunker) |*ch| ch.deinit();
 
         // Wrap all inserts in a single transaction for performance
         db_.exec("BEGIN") catch {};
@@ -377,6 +394,9 @@ pub fn main() !void {
             };
             defer walker.deinit();
 
+            var col_count: usize = 0;
+            var col_new: usize = 0;
+
             while (try walker.next()) |entry| {
                 if (entry.kind == .file and std.mem.endsWith(u8, entry.path, ".md")) {
                     var full_path_buf: [1024]u8 = undefined;
@@ -388,46 +408,51 @@ pub fn main() !void {
                     };
                     defer allocator.free(content);
 
-                    qmd.store.insertDocument(&db_, col.name, entry.path, content) catch |err| {
+                    const insert_result = qmd.store.insertDocument(&db_, col.name, entry.path, content) catch |err| {
                         try stdout.print("    Error inserting {s}: {any}\n", .{ entry.path, err });
                         continue;
                     };
+                    total_indexed += 1;
+                    col_count += 1;
 
-                    const doc_hash = qmd.store.findActiveDocumentHash(&db_, col.name, entry.path) catch {
-                        total_indexed += 1;
+                    // Progress reporting every 500 documents
+                    if (col_count % 500 == 0) {
+                        try stdout.print("  ... {d} documents processed\n", .{col_count});
+                        try stdout.flush();
+                    }
+
+                    // Skip chunking and embedding if content is unchanged
+                    if (!insert_result.content_changed) {
+                        total_skipped += 1;
                         continue;
-                    };
+                    }
+                    col_new += 1;
+                    const doc_hash = insert_result.hash;
 
                     var chunk_slices = std.ArrayList([]const u8).initCapacity(allocator, 0) catch {
-                        total_indexed += 1;
                         continue;
                     };
                     defer chunk_slices.deinit(allocator);
 
                     if (std.mem.eql(u8, qmd.ast.detectLanguage(entry.path), "markdown")) {
-                        if (qmd.ast.AstChunker.init(allocator, "markdown")) |chunker| {
-                            var ast_chunker = chunker;
-                            defer ast_chunker.deinit();
-                            if (ast_chunker.chunk(content, 1200)) |chunks| {
+                        if (ast_chunker) |*chunker| {
+                            if (chunker.chunk(content, 1200)) |chunks| {
                                 var ast_chunks = chunks;
                                 defer ast_chunks.deinit(allocator);
                                 try chunk_slices.appendSlice(allocator, ast_chunks.items);
                             } else |_| {}
-                        } else |_| {}
+                        }
                     }
 
                     if (chunk_slices.items.len == 0) {
                         var chunks = qmd.chunker.chunkDocument(content, allocator) catch {
-                            total_indexed += 1;
                             continue;
                         };
                         defer chunks.chunks.deinit(allocator);
                         try chunk_slices.appendSlice(allocator, chunks.chunks.items);
                     }
 
-                    if (make_embedding_engine(allocator)) |engine_instance| {
-                        var engine = engine_instance;
-                        defer engine.deinit();
+                    if (embedding_engine) |*engine| {
                         for (chunk_slices.items, 0..) |chunk, idx| {
                             const formatted = qmd.llm.formatDocForEmbedding(allocator, chunk) catch continue;
                             defer allocator.free(formatted);
@@ -438,13 +463,7 @@ pub fn main() !void {
                                 continue;
                             };
                         }
-                    } else {
-                        // fallback deterministic embedding for now
-                        var fallback = qmd.llm.LlamaCpp.init("/nonexistent", allocator) catch {
-                            total_indexed += 1;
-                            continue;
-                        };
-                        defer fallback.deinit();
+                    } else if (fallback_engine) |*fallback| {
                         for (chunk_slices.items, 0..) |chunk, idx| {
                             const formatted = qmd.llm.formatDocForEmbedding(allocator, chunk) catch continue;
                             defer allocator.free(formatted);
@@ -456,15 +475,22 @@ pub fn main() !void {
                             };
                         }
                     }
-                    total_indexed += 1;
                 }
             }
-            try stdout.print("  Indexed {d} documents\n", .{total_indexed});
+            if (col_new < col_count) {
+                try stdout.print("  Indexed {d} documents ({d} new, {d} unchanged)\n", .{ col_count, col_new, col_count - col_new });
+            } else {
+                try stdout.print("  Indexed {d} documents\n", .{col_count});
+            }
         }
 
         db_.exec("COMMIT") catch {};
 
-        try stdout.print("Update complete. Total: {d} documents\n", .{total_indexed});
+        if (total_skipped > 0) {
+            try stdout.print("Update complete. Total: {d} documents ({d} unchanged, skipped)\n", .{ total_indexed, total_skipped });
+        } else {
+            try stdout.print("Update complete. Total: {d} documents\n", .{total_indexed});
+        }
         try stdout.flush();
         return;
     }

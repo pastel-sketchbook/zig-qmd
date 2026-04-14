@@ -742,8 +742,8 @@ test "hybridSearch with FTS only" {
     defer db_.close();
     try db.initSchema(&db_);
 
-    try store.insertDocument(&db_, "test", "a.md", "# Auth\nLogin flow");
-    try store.insertDocument(&db_, "test", "b.md", "# Setup\nInstall");
+    _ = try store.insertDocument(&db_, "test", "a.md", "# Auth\nLogin flow");
+    _ = try store.insertDocument(&db_, "test", "b.md", "# Setup\nInstall");
 
     var result = try hybridSearch(&db_, std.heap.page_allocator, "auth", null, .{ .enable_vector = false });
     defer result.deinit(std.heap.page_allocator);
@@ -756,8 +756,8 @@ test "searchVec uses stored vectors and ranks by cosine" {
     defer db_.close();
     try db.initSchema(&db_);
 
-    try store.insertDocument(&db_, "test", "a.md", "# Auth\nLogin and auth flow");
-    try store.insertDocument(&db_, "test", "b.md", "# Cooking\nRecipe and food");
+    _ = try store.insertDocument(&db_, "test", "a.md", "# Auth\nLogin and auth flow");
+    _ = try store.insertDocument(&db_, "test", "b.md", "# Cooking\nRecipe and food");
 
     const doc_a = try store.findActiveDocument(&db_, "test", "a.md", std.testing.allocator);
     defer {
@@ -793,8 +793,8 @@ test "hybridSearch supports query expansion option" {
     defer db_.close();
     try db.initSchema(&db_);
 
-    try store.insertDocument(&db_, "test", "a.md", "# Login\nHow to authenticate users");
-    try store.insertDocument(&db_, "test", "b.md", "# Cooking\nHow to boil pasta");
+    _ = try store.insertDocument(&db_, "test", "a.md", "# Login\nHow to authenticate users");
+    _ = try store.insertDocument(&db_, "test", "b.md", "# Cooking\nHow to boil pasta");
 
     var result = try hybridSearch(&db_, std.heap.page_allocator, "how login?", null, .{
         .enable_vector = true,
@@ -812,8 +812,8 @@ test "hybridSearch supports rerank option" {
     defer db_.close();
     try db.initSchema(&db_);
 
-    try store.insertDocument(&db_, "test", "a.md", "# Authentication\nOAuth token login");
-    try store.insertDocument(&db_, "test", "b.md", "# Recipe\nPasta cooking instructions");
+    _ = try store.insertDocument(&db_, "test", "a.md", "# Authentication\nOAuth token login");
+    _ = try store.insertDocument(&db_, "test", "b.md", "# Recipe\nPasta cooking instructions");
 
     var result = try hybridSearch(&db_, std.heap.page_allocator, "oauth login", null, .{
         .enable_vector = true,
@@ -831,7 +831,7 @@ test "hybridSearch supports abort signal" {
     defer db_.close();
     try db.initSchema(&db_);
 
-    try store.insertDocument(&db_, "test", "a.md", "# A\n\nauth flow");
+    _ = try store.insertDocument(&db_, "test", "a.md", "# A\n\nauth flow");
 
     var aborted = std.atomic.Value(bool).init(true);
     var result = try hybridSearch(&db_, std.heap.page_allocator, "auth", null, .{

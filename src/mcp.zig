@@ -484,7 +484,7 @@ fn setupMcpTestDb(allocator: std.mem.Allocator) ![]u8 {
 
     try db.initSchema(&conn);
     try config.addCollection(&conn, "wiki", "/tmp");
-    try store.insertDocument(&conn, "wiki", "a.md", "# Alpha\n\nhello world");
+    _ = try store.insertDocument(&conn, "wiki", "a.md", "# Alpha\n\nhello world");
 
     return db_path;
 }

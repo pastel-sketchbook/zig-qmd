@@ -55,8 +55,12 @@ pub const Qmd = struct {
                 const content = std.fs.cwd().readFileAlloc(self.allocator, full_path, 1024 * 1024) catch continue;
                 defer self.allocator.free(content);
 
-                store.insertDocument(&self.db, col.name, entry.path, content) catch continue;
-                const doc_hash = store.findActiveDocumentHash(&self.db, col.name, entry.path) catch continue;
+                const insert_result = store.insertDocument(&self.db, col.name, entry.path, content) catch continue;
+                total_indexed += 1;
+
+                // Skip chunking and embedding when content is unchanged
+                if (!insert_result.content_changed) continue;
+                const doc_hash = insert_result.hash;
 
                 var chunk_slices = try std.ArrayList([]const u8).initCapacity(self.allocator, 0);
                 defer chunk_slices.deinit(self.allocator);
@@ -91,8 +95,6 @@ pub const Qmd = struct {
                         continue;
                     };
                 }
-
-                total_indexed += 1;
             }
         }
         return total_indexed;
@@ -157,7 +159,7 @@ test "ZMD open init add update search get" {
     defer config.freeCollections(&cols);
     try std.testing.expect(cols.collections.items.len >= 1);
 
-    try store.insertDocument(&engine.db, "notes", "a.md", "# A\n\nhello auth");
+    _ = try store.insertDocument(&engine.db, "notes", "a.md", "# A\n\nhello auth");
     var res = try engine.search_fts("auth", null);
     defer res.deinit(allocator);
     try std.testing.expect(res.results.items.len >= 1);

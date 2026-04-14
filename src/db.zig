@@ -14,9 +14,18 @@ pub const DbError = error{
     ColumnError,
 };
 
+/// Maximum number of cached prepared statements per database connection.
+const STMT_CACHE_CAP = 16;
+
 /// Thin wrapper around a SQLite database connection.
 pub const Db = struct {
     handle: *c.sqlite3,
+
+    /// Fixed-capacity cache for prepared statements keyed by SQL string pointer.
+    /// Avoids repeated sqlite3_prepare_v2 calls for the same SQL in hot loops.
+    cache_sql: [STMT_CACHE_CAP]?[*:0]const u8 = [_]?[*:0]const u8{null} ** STMT_CACHE_CAP,
+    cache_stmt: [STMT_CACHE_CAP]?*c.sqlite3_stmt = [_]?*c.sqlite3_stmt{null} ** STMT_CACHE_CAP,
+    cache_len: usize = 0,
 
     /// Open (or create) a database at `path`. Use ":memory:" for in-memory.
     pub fn open(path: [*:0]const u8) DbError!Db {
@@ -29,8 +38,12 @@ pub const Db = struct {
         return Db{ .handle = handle.? };
     }
 
-    /// Close the database connection.
+    /// Close the database connection, finalizing any cached statements first.
     pub fn close(self: *Db) void {
+        for (self.cache_stmt[0..self.cache_len]) |maybe_stmt| {
+            if (maybe_stmt) |s| _ = c.sqlite3_finalize(s);
+        }
+        self.cache_len = 0;
         _ = c.sqlite3_close(self.handle);
     }
 
@@ -54,9 +67,48 @@ pub const Db = struct {
         return Stmt{ .handle = stmt };
     }
 
+    /// Return a cached prepared statement, creating it on first call.
+    /// The returned Stmt is reset and ready for new bindings.
+    /// IMPORTANT: callers must NOT finalize statements returned by this method —
+    /// they are owned by the cache and finalized in Db.close().
+    pub fn prepareCached(self: *Db, sql: [*:0]const u8) DbError!Stmt {
+        // Look up by pointer identity (works for comptime string literals).
+        for (self.cache_sql[0..self.cache_len], 0..) |maybe_sql, i| {
+            if (maybe_sql) |cached_sql| {
+                if (cached_sql == sql) {
+                    const h = self.cache_stmt[i].?;
+                    _ = c.sqlite3_reset(h);
+                    _ = c.sqlite3_clear_bindings(h);
+                    return Stmt{ .handle = h };
+                }
+            }
+        }
+
+        // Not cached — prepare and store.
+        var stmt: ?*c.sqlite3_stmt = null;
+        const rc = c.sqlite3_prepare_v2(self.handle, sql, -1, &stmt, null);
+        if (rc != c.SQLITE_OK or stmt == null) {
+            return DbError.PrepareFailed;
+        }
+
+        if (self.cache_len < STMT_CACHE_CAP) {
+            self.cache_sql[self.cache_len] = sql;
+            self.cache_stmt[self.cache_len] = stmt;
+            self.cache_len += 1;
+        }
+        // If cache is full, return an uncached statement (still works, just not cached).
+
+        return Stmt{ .handle = stmt };
+    }
+
     /// Return the last error message from SQLite (useful for diagnostics).
     pub fn errmsg(self: *Db) [*:0]const u8 {
         return c.sqlite3_errmsg(self.handle);
+    }
+
+    /// Return the number of rows modified by the most recent INSERT/UPDATE/DELETE.
+    pub fn changes(self: *Db) i32 {
+        return c.sqlite3_changes(self.handle);
     }
 };
 
@@ -328,4 +380,31 @@ test "FTS5 trigger fires on insert" {
     try std.testing.expect(has_row);
     const filepath = stmt.columnText(0);
     try std.testing.expectEqualStrings("notes/test.md", std.mem.span(filepath.?));
+}
+
+test "prepareCached reuses statements across calls" {
+    var db_ = try Db.open(":memory:");
+    defer db_.close();
+    try initSchema(&db_);
+
+    try db_.exec("INSERT INTO content (hash, doc, created_at) VALUES ('h1', 'doc1', '2024-01-01')");
+
+    // First call prepares; second call reuses.
+    const sql = "SELECT doc FROM content WHERE hash = ?";
+    {
+        var stmt1 = try db_.prepareCached(sql);
+        try stmt1.bindText(1, "h1");
+        try std.testing.expect(try stmt1.step());
+        try std.testing.expectEqualStrings("doc1", std.mem.span(stmt1.columnText(0).?));
+        // Do NOT finalize — owned by cache.
+    }
+    {
+        var stmt2 = try db_.prepareCached(sql);
+        try stmt2.bindText(1, "h1");
+        try std.testing.expect(try stmt2.step());
+        try std.testing.expectEqualStrings("doc1", std.mem.span(stmt2.columnText(0).?));
+    }
+
+    // Verify only one entry in cache.
+    try std.testing.expectEqual(@as(usize, 1), db_.cache_len);
 }

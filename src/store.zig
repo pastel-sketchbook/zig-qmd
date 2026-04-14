@@ -101,21 +101,52 @@ pub fn extractTitle(content: []const u8) []const u8 {
     return "Untitled";
 }
 
-/// Inserts content into the content-addressable store, returning its SHA-256 hash.
-pub fn insertContent(db_: *db.Db, content: []const u8) StoreError![SHA256_HEX_LEN]u8 {
+/// Result of inserting a document: the content hash and whether the content was new.
+pub const InsertResult = struct {
+    hash: [SHA256_HEX_LEN]u8,
+    /// True when the content blob was inserted for the first time (hash not seen before).
+    content_changed: bool,
+};
+
+/// Inserts content into the content-addressable store, returning its SHA-256 hash
+/// and whether the content was actually new (INSERT OR IGNORE affected a row).
+pub fn insertContent(db_: *db.Db, content: []const u8) StoreError!InsertResult {
     var hash: [SHA256_HEX_LEN:0]u8 = undefined;
     hashContent(content, &hash);
 
     const now = "2024-01-01T00:00:00Z";
     const sql = "INSERT OR IGNORE INTO content (hash, doc, created_at) VALUES (?, ?, ?)";
-    var stmt = try db_.prepare(sql);
-    defer stmt.finalize();
+    var stmt = try db_.prepareCached(sql);
     try stmt.bindText(1, hash[0..SHA256_HEX_LEN]);
     try stmt.bindText(2, content);
     try stmt.bindText(3, now);
     _ = try stmt.step();
 
-    return hash;
+    const content_changed = db_.changes() > 0;
+
+    return .{ .hash = hash, .content_changed = content_changed };
+}
+
+/// Inserts or replaces a document in the store, extracting title and computing content hash.
+/// Returns the content SHA-256 hash and whether the content blob was new, so callers
+/// can skip expensive downstream work (chunking, embedding) for unchanged documents.
+pub fn insertDocument(db_: *db.Db, collection: []const u8, path: []const u8, content: []const u8) StoreError!InsertResult {
+    const result = try insertContent(db_, content);
+
+    const title = extractTitle(content);
+    const now = "2024-01-01T00:00:00Z";
+
+    const sql = "INSERT OR REPLACE INTO documents (collection, path, title, hash, created_at, modified_at, active) VALUES (?, ?, ?, ?, ?, ?, 1)";
+    var stmt = try db_.prepareCached(sql);
+    try stmt.bindText(1, collection);
+    try stmt.bindText(2, path);
+    try stmt.bindText(3, title);
+    try stmt.bindText(4, result.hash[0..SHA256_HEX_LEN]);
+    try stmt.bindText(5, now);
+    try stmt.bindText(6, now);
+    _ = try stmt.step();
+
+    return result;
 }
 
 /// Looks up an active document by collection and path, returning its metadata and content.
@@ -196,25 +227,6 @@ pub fn deactivateDocument(db_: *db.Db, collection: []const u8, path: []const u8)
     _ = try stmt.step();
 }
 
-/// Inserts or replaces a document in the store, extracting title and computing content hash.
-pub fn insertDocument(db_: *db.Db, collection: []const u8, path: []const u8, content: []const u8) StoreError!void {
-    const hash = try insertContent(db_, content);
-
-    const title = extractTitle(content);
-    const now = "2024-01-01T00:00:00Z";
-
-    const sql = "INSERT OR REPLACE INTO documents (collection, path, title, hash, created_at, modified_at, active) VALUES (?, ?, ?, ?, ?, ?, 1)";
-    var stmt = try db_.prepare(sql);
-    defer stmt.finalize();
-    try stmt.bindText(1, collection);
-    try stmt.bindText(2, path);
-    try stmt.bindText(3, title);
-    try stmt.bindText(4, hash[0..SHA256_HEX_LEN]);
-    try stmt.bindText(5, now);
-    try stmt.bindText(6, now);
-    _ = try stmt.step();
-}
-
 /// Stores a vector embedding for a document's content hash at default position.
 pub fn upsertContentVector(
     db_: *db.Db,
@@ -247,10 +259,9 @@ pub fn upsertContentVectorAt(
     try emb_json.append(allocator, ']');
 
     const now = "2024-01-01T00:00:00Z";
-    var stmt = try db_.prepare(
+    var stmt = try db_.prepareCached(
         "INSERT OR REPLACE INTO content_vectors (hash, seq, pos, model, embedding, embedded_at) VALUES (?, ?, ?, ?, ?, ?)",
     );
-    defer stmt.finalize();
 
     try stmt.bindText(1, hash);
     try stmt.bindInt(2, @intCast(seq));
@@ -260,15 +271,13 @@ pub fn upsertContentVectorAt(
     try stmt.bindText(6, now);
     _ = try stmt.step();
 
-    var del_idx = try db_.prepare("DELETE FROM content_vectors_idx WHERE hash = ? AND seq = ? AND pos = ?");
-    defer del_idx.finalize();
+    var del_idx = try db_.prepareCached("DELETE FROM content_vectors_idx WHERE hash = ? AND seq = ? AND pos = ?");
     try del_idx.bindText(1, hash);
     try del_idx.bindInt(2, @intCast(seq));
     try del_idx.bindInt(3, @intCast(pos));
     _ = try del_idx.step();
 
-    var ins_idx = try db_.prepare("INSERT INTO content_vectors_idx(embedding, hash, model, seq, pos) VALUES(vec_f32(?), ?, ?, ?, ?)");
-    defer ins_idx.finalize();
+    var ins_idx = try db_.prepareCached("INSERT INTO content_vectors_idx(embedding, hash, model, seq, pos) VALUES(vec_f32(?), ?, ?, ?, ?)");
     try ins_idx.bindText(1, emb_json.items);
     try ins_idx.bindText(2, hash);
     try ins_idx.bindText(3, model);
@@ -382,13 +391,14 @@ test "insertContent and retrieve" {
     defer db_.close();
     try db.initSchema(&db_);
 
-    const hash = try insertContent(&db_, "hello world");
+    const result = try insertContent(&db_, "hello world");
 
     var stmt = try db_.prepare("SELECT doc FROM content WHERE hash = ?");
     defer stmt.finalize();
-    try stmt.bindText(1, hash[0..]);
+    try stmt.bindText(1, result.hash[0..]);
     const has_row = try stmt.step();
     try std.testing.expect(has_row);
+    try std.testing.expect(result.content_changed);
     const doc = stmt.columnText(0);
     try std.testing.expectEqualStrings("hello world", std.mem.span(doc.?));
 }
@@ -398,7 +408,7 @@ test "findActiveDocument returns document" {
     defer db_.close();
     try db.initSchema(&db_);
 
-    try insertDocument(&db_, "notes", "test.md", "# Test Doc\n\nHello world");
+    _ = try insertDocument(&db_, "notes", "test.md", "# Test Doc\n\nHello world");
 
     const doc = try findActiveDocument(&db_, "notes", "test.md", std.testing.allocator);
     defer {
@@ -415,21 +425,34 @@ test "deactivateDocument marks inactive" {
     defer db_.close();
     try db.initSchema(&db_);
 
-    try insertDocument(&db_, "notes", "test.md", "# Test\n\nContent");
+    _ = try insertDocument(&db_, "notes", "test.md", "# Test\n\nContent");
     try deactivateDocument(&db_, "notes", "test.md");
 
     const result = findActiveDocument(&db_, "notes", "test.md", std.testing.allocator);
     try std.testing.expectError(StoreError.NotFound, result);
 }
 
-test "findActiveDocumentHash returns stable 64-byte hash" {
+test "insertDocument returns stable 64-byte hash and content_changed flag" {
     var db_ = try db.Db.open(":memory:");
     defer db_.close();
     try db.initSchema(&db_);
 
-    try insertDocument(&db_, "notes", "x.md", "# X\n\ncontent");
-    const hash = try findActiveDocumentHash(&db_, "notes", "x.md");
-    try std.testing.expectEqual(@as(usize, 64), hash.len);
+    const result = try insertDocument(&db_, "notes", "x.md", "# X\n\ncontent");
+    try std.testing.expectEqual(@as(usize, 64), result.hash.len);
+    try std.testing.expect(result.content_changed);
+
+    // Verify it matches findActiveDocumentHash (the old way)
+    const hash2 = try findActiveDocumentHash(&db_, "notes", "x.md");
+    try std.testing.expectEqualStrings(&result.hash, &hash2);
+
+    // Re-insert same content — content_changed should be false
+    const result2 = try insertDocument(&db_, "notes", "x.md", "# X\n\ncontent");
+    try std.testing.expect(!result2.content_changed);
+    try std.testing.expectEqualStrings(&result.hash, &result2.hash);
+
+    // Insert different content — content_changed should be true again
+    const result3 = try insertDocument(&db_, "notes", "x.md", "# X\n\nupdated content");
+    try std.testing.expect(result3.content_changed);
 }
 
 test "getActiveDocumentPaths returns all paths" {
@@ -437,8 +460,8 @@ test "getActiveDocumentPaths returns all paths" {
     defer db_.close();
     try db.initSchema(&db_);
 
-    try insertDocument(&db_, "notes", "a.md", "# A\n\nContent");
-    try insertDocument(&db_, "notes", "b.md", "# B\n\nContent");
+    _ = try insertDocument(&db_, "notes", "a.md", "# A\n\nContent");
+    _ = try insertDocument(&db_, "notes", "b.md", "# B\n\nContent");
 
     var result = try getActiveDocumentPaths(&db_, "notes", std.testing.allocator);
     defer {
@@ -455,7 +478,7 @@ test "upsertContentVector stores embedding JSON" {
     defer db_.close();
     try db.initSchema(&db_);
 
-    try insertDocument(&db_, "notes", "a.md", "# A\n\ncontent");
+    _ = try insertDocument(&db_, "notes", "a.md", "# A\n\ncontent");
     const doc = try findActiveDocument(&db_, "notes", "a.md", std.testing.allocator);
     defer {
         std.testing.allocator.free(doc.title);
@@ -481,7 +504,7 @@ test "upsertContentVectorAt stores multiple chunk vectors" {
     defer db_.close();
     try db.initSchema(&db_);
 
-    try insertDocument(&db_, "notes", "a.md", "# A\n\ncontent");
+    _ = try insertDocument(&db_, "notes", "a.md", "# A\n\ncontent");
     const doc = try findActiveDocument(&db_, "notes", "a.md", std.testing.allocator);
     defer {
         std.testing.allocator.free(doc.title);
@@ -504,8 +527,8 @@ test "insertDocument replaces active row for same path" {
     defer db_.close();
     try db.initSchema(&db_);
 
-    try insertDocument(&db_, "notes", "same.md", "---\ntitle: \"First\"\n---\n# First");
-    try insertDocument(&db_, "notes", "same.md", "---\ntitle: \"Second\"\n---\n# Second");
+    _ = try insertDocument(&db_, "notes", "same.md", "---\ntitle: \"First\"\n---\n# First");
+    _ = try insertDocument(&db_, "notes", "same.md", "---\ntitle: \"Second\"\n---\n# Second");
 
     var stmt = try db_.prepare("SELECT count(*) FROM documents WHERE collection = 'notes' AND path = 'same.md' AND active = 1");
     defer stmt.finalize();
@@ -526,14 +549,11 @@ test "cleanupOrphans removes inactive content and vectors" {
     defer db_.close();
     try db.initSchema(&db_);
 
-    try insertDocument(&db_, "notes", "keep.md", "# Keep\n\nactive");
-    try insertDocument(&db_, "notes", "drop.md", "# Drop\n\ninactive");
+    const keep_result = try insertDocument(&db_, "notes", "keep.md", "# Keep\n\nactive");
+    const drop_result = try insertDocument(&db_, "notes", "drop.md", "# Drop\n\ninactive");
 
-    const keep_hash = try findActiveDocumentHash(&db_, "notes", "keep.md");
-    const drop_hash = try findActiveDocumentHash(&db_, "notes", "drop.md");
-
-    try upsertContentVector(&db_, keep_hash[0..], "m", &.{ 0.1, 0.2 }, std.testing.allocator);
-    try upsertContentVector(&db_, drop_hash[0..], "m", &.{ 0.3, 0.4 }, std.testing.allocator);
+    try upsertContentVector(&db_, keep_result.hash[0..], "m", &.{ 0.1, 0.2 }, std.testing.allocator);
+    try upsertContentVector(&db_, drop_result.hash[0..], "m", &.{ 0.3, 0.4 }, std.testing.allocator);
 
     try deactivateDocument(&db_, "notes", "drop.md");
 

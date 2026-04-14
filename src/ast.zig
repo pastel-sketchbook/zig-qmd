@@ -31,18 +31,40 @@ pub const AstChunker = struct {
     language: []const u8,
     allocator: std.mem.Allocator,
     breakpoints: std.ArrayList(Breakpoint),
+    /// Reusable tree-sitter parser (created once, reused across chunk calls).
+    ts_parser: ?*c.TSParser = null,
 
     /// Creates an AstChunker for the given language.
+    /// Allocates a tree-sitter parser that is reused across all chunk() calls.
     pub fn init(allocator: std.mem.Allocator, language: []const u8) !AstChunker {
-        return .{
+        var chunker = AstChunker{
             .language = language,
             .allocator = allocator,
             .breakpoints = try std.ArrayList(Breakpoint).initCapacity(allocator, 0),
         };
+
+        // Pre-create and configure the tree-sitter parser for reuse.
+        if (std.mem.eql(u8, language, "markdown")) {
+            if (c.ts_parser_new()) |parser| {
+                if (tree_sitter_markdown()) |lang| {
+                    if (c.ts_parser_set_language(parser, lang)) {
+                        chunker.ts_parser = parser;
+                    } else {
+                        c.ts_parser_delete(parser);
+                    }
+                } else {
+                    c.ts_parser_delete(parser);
+                }
+            }
+        }
+
+        return chunker;
     }
 
-    /// Frees internal breakpoint storage.
+    /// Frees internal breakpoint storage and the tree-sitter parser.
     pub fn deinit(self: *AstChunker) void {
+        if (self.ts_parser) |parser| c.ts_parser_delete(parser);
+        self.ts_parser = null;
         self.breakpoints.deinit(self.allocator);
     }
 
@@ -132,11 +154,7 @@ fn is_heading(line: []const u8) bool {
 }
 
 fn extract_with_tree_sitter(self: *AstChunker, content: []const u8) !void {
-    const parser = c.ts_parser_new() orelse return;
-    defer c.ts_parser_delete(parser);
-
-    const lang = tree_sitter_markdown() orelse return;
-    if (!c.ts_parser_set_language(parser, lang)) return;
+    const parser = self.ts_parser orelse return;
 
     const tree = c.ts_parser_parse_string(parser, null, content.ptr, @intCast(content.len)) orelse return;
     defer c.ts_tree_delete(tree);
