@@ -3,7 +3,6 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const enable_llama = b.option(bool, "llama", "Enable llama.cpp integration (requires llama submodule)") orelse false;
 
     // --- SQLite C static library ---
     const sqlite = b.addLibrary(.{
@@ -24,72 +23,6 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // --- Llama.cpp library (optional) ---
-    var llama_compile: ?*std.Build.Step.Compile = null;
-    if (enable_llama) {
-        const llama = b.addLibrary(.{
-            .name = "llama",
-            .root_module = b.createModule(.{
-                .target = target,
-                .optimize = optimize,
-                .link_libc = true,
-            }),
-        });
-        llama.addIncludePath(b.path("deps/llama.cpp/include"));
-        llama.addIncludePath(b.path("deps/llama.cpp/ggml/include"));
-        llama.addIncludePath(b.path("deps/llama.cpp/gguf"));
-        // Add llama.cpp source files
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/src/llama.cpp"), .flags = &.{"-std=c++17"} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/src/llama-model.cpp"), .flags = &.{"-std=c++17"} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/src/llama-context.cpp"), .flags = &.{"-std=c++17"} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/src/llama-batch.cpp"), .flags = &.{"-std=c++17"} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/src/llama-vocab.cpp"), .flags = &.{"-std=c++17"} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/src/llama-kv-cache.cpp"), .flags = &.{"-std=c++17"} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/src/llama-graph.cpp"), .flags = &.{"-std=c++17"} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/src/llama-sampler.cpp"), .flags = &.{"-std=c++17"} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/src/llama-grammar.cpp"), .flags = &.{"-std=c++17"} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/src/llama-chat.cpp"), .flags = &.{"-std=c++17"} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/src/llama-io.cpp"), .flags = &.{"-std=c++17"} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/src/llama-arch.cpp"), .flags = &.{"-std=c++17"} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/src/llama-hparams.cpp"), .flags = &.{"-std=c++17"} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/src/llama-cparams.cpp"), .flags = &.{"-std=c++17"} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/src/llama-memory.cpp"), .flags = &.{"-std=c++17"} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/src/llama-model-loader.cpp"), .flags = &.{"-std=c++17"} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/src/llama-quant.cpp"), .flags = &.{"-std=c++17"} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/src/llama-mmap.cpp"), .flags = &.{"-std=c++17"} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/src/llama-impl.cpp"), .flags = &.{"-std=c++17"} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/src/llama-adapter.cpp"), .flags = &.{"-std=c++17"} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/src/llama-batch.cpp"), .flags = &.{"-std=c++17"} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/src/unicode.cpp"), .flags = &.{"-std=c++17"} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/src/unicode-data.cpp"), .flags = &.{"-std=c++17"} });
-        // ggml sources
-        llama.addIncludePath(b.path("deps/llama.cpp/ggml/src"));
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/ggml/src/ggml.c"), .flags = &.{} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/ggml/src/ggml-backend.cpp"), .flags = &.{} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/ggml/src/ggml-alloc.c"), .flags = &.{} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/ggml/src/ggml-backend-backend.c"), .flags = &.{} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/ggml/src/ggml-quants.c"), .flags = &.{} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/ggml/src/ggml-unicode.c"), .flags = &.{} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/ggml/src/ggml-unicode-data.c"), .flags = &.{} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/ggml/src/ggml-cpu.c"), .flags = &.{} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/ggml/src/ggml-cpu-dispatch.c"), .flags = &.{} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/ggml/src/ggml-threading.c"), .flags = &.{} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/ggml/src/ggml-opt.c"), .flags = &.{} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/ggml/src/ggml-sched.c"), .flags = &.{} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/ggml/src/ggml-cortex.c"), .flags = &.{} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/ggml/src/ggml-cortex-alloc.c"), .flags = &.{} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/ggml/src/ggml-cortex-dispatch.c"), .flags = &.{} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/ggml/src/ggml-cortex-inferencegemm.c"), .flags = &.{} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/ggml/src/ggml-f16.c"), .flags = &.{} });
-        llama.addCSourceFile(.{ .file = b.path("deps/llama.cpp/ggml/src/ggml-impl.c"), .flags = &.{} });
-        if (target.result.os.tag == .macos) {
-            llama.linkFramework("Metal");
-            llama.linkFramework("MetalKit");
-            llama.linkFramework("Accelerate");
-        }
-        llama_compile = llama;
-    }
-
     // --- Library module (SDK) ---
     const mod = b.addModule("qmd", .{
         .root_source_file = b.path("src/root.zig"),
@@ -97,9 +30,6 @@ pub fn build(b: *std.Build) void {
     });
     mod.addIncludePath(b.path("deps"));
     mod.linkLibrary(sqlite);
-    if (llama_compile) |lib| {
-        mod.linkLibrary(lib);
-    }
 
     // --- CLI executable ---
     const exe = b.addExecutable(.{
@@ -114,9 +44,14 @@ pub fn build(b: *std.Build) void {
         }),
     });
     exe.linkLibrary(sqlite);
-    if (llama_compile) |lib| {
-        exe.linkLibrary(lib);
+
+    // Metal framework on macOS for future llama.cpp GPU acceleration
+    if (target.result.os.tag == .macos) {
+        exe.linkFramework("Metal");
+        exe.linkFramework("MetalKit");
+        exe.linkFramework("Accelerate");
     }
+
     b.installArtifact(exe);
 
     // --- Run step ---
