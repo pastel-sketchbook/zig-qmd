@@ -354,11 +354,17 @@ pub fn main() !void {
     }
 
     if (std.mem.eql(u8, cmd, "query")) {
-        const query_text = args.next() orelse {
+        const first_arg = args.next() orelse {
             try stdout.writeAll("Usage: zmd query <query>\n");
             try stdout.flush();
             return;
         };
+        if (std.mem.eql(u8, first_arg, "--help") or std.mem.eql(u8, first_arg, "-h")) {
+            try stdout.writeAll("Usage: zmd query <query> [--expand] [--rerank] [--json|--csv|--md]\n");
+            try stdout.flush();
+            return;
+        }
+        const query_text = first_arg;
 
         var enable_expand = false;
         var enable_rerank = false;
@@ -457,11 +463,17 @@ pub fn main() !void {
     }
 
     if (std.mem.eql(u8, cmd, "context")) {
-        const query_text = args.next() orelse {
+        const first_arg = args.next() orelse {
             try stdout.writeAll("Usage: zmd context <query> [--json]\n");
             try stdout.flush();
             return;
         };
+        if (std.mem.eql(u8, first_arg, "--help") or std.mem.eql(u8, first_arg, "-h")) {
+            try stdout.writeAll("Usage: zmd context <query> [--json]\n");
+            try stdout.flush();
+            return;
+        }
+        const query_text = first_arg;
 
         var output_format: OutputFormat = .text;
         while (args.next()) |arg| {
@@ -542,11 +554,17 @@ pub fn main() !void {
     }
 
     if (std.mem.eql(u8, cmd, "search")) {
-        const query_text = args.next() orelse {
+        const first_arg = args.next() orelse {
             try stdout.writeAll("Usage: zmd search <query> [collection]\n");
             try stdout.flush();
             return;
         };
+        if (std.mem.eql(u8, first_arg, "--help") or std.mem.eql(u8, first_arg, "-h")) {
+            try stdout.writeAll("Usage: zmd search <query> [collection] [--json|--csv|--md]\n");
+            try stdout.flush();
+            return;
+        }
+        const query_text = first_arg;
         var collection: ?[]const u8 = null;
         var output_format: OutputFormat = .text;
         while (args.next()) |arg| {
@@ -626,11 +644,17 @@ pub fn main() !void {
     }
 
     if (std.mem.eql(u8, cmd, "vsearch")) {
-        const query_text = args.next() orelse {
+        const first_arg = args.next() orelse {
             try stdout.writeAll("Usage: zmd vsearch <query>\n");
             try stdout.flush();
             return;
         };
+        if (std.mem.eql(u8, first_arg, "--help") or std.mem.eql(u8, first_arg, "-h")) {
+            try stdout.writeAll("Usage: zmd vsearch <query> [--json|--csv|--md]\n");
+            try stdout.flush();
+            return;
+        }
+        const query_text = first_arg;
 
         var output_format: OutputFormat = .text;
         while (args.next()) |arg| {
@@ -705,11 +729,17 @@ pub fn main() !void {
     }
 
     if (std.mem.eql(u8, cmd, "get")) {
-        const doc_path = args.next() orelse {
+        const first_arg = args.next() orelse {
             try stdout.writeAll("Usage: zmd get <path>\n");
             try stdout.flush();
             return;
         };
+        if (std.mem.eql(u8, first_arg, "--help") or std.mem.eql(u8, first_arg, "-h")) {
+            try stdout.writeAll("Usage: zmd get <collection/path|qmd://collection/path>\n");
+            try stdout.flush();
+            return;
+        }
+        const doc_path = first_arg;
 
         var db_path_buf: [256]u8 = undefined;
         const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}", .{DB_PATH});
@@ -757,6 +787,12 @@ pub fn main() !void {
             } else {
                 try refs.append(allocator, arg);
             }
+        }
+
+        if (refs.items.len == 1 and (std.mem.eql(u8, refs.items[0], "--help") or std.mem.eql(u8, refs.items[0], "-h"))) {
+            try stdout.writeAll("Usage: zmd multi-get <doc-ref...> [--json|--csv|--md]\n");
+            try stdout.flush();
+            return;
         }
 
         if (refs.items.len == 0) {
@@ -1033,4 +1069,28 @@ pub fn main() !void {
 
 test "placeholder" {
     try std.testing.expect(true);
+}
+
+test "parseOutputFlag parses known flags" {
+    try std.testing.expect(parseOutputFlag("--json").? == .json);
+    try std.testing.expect(parseOutputFlag("--csv").? == .csv);
+    try std.testing.expect(parseOutputFlag("--md").? == .md);
+    try std.testing.expect(parseOutputFlag("--nope") == null);
+}
+
+test "parseDocRef parses virtual and plain paths" {
+    const a = parseDocRef("qmd://notes/a.md") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualStrings("notes", a.collection);
+    try std.testing.expectEqualStrings("a.md", a.path);
+
+    const b = parseDocRef("docs/b.md") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualStrings("docs", b.collection);
+    try std.testing.expectEqualStrings("b.md", b.path);
+}
+
+test "extractSnippet returns contextual content" {
+    const doc = "intro text\nOAuth token login flow and refresh\nmore details";
+    const snippet = try extractSnippet(std.testing.allocator, "oauth", doc);
+    defer std.testing.allocator.free(snippet);
+    try std.testing.expect(std.mem.indexOf(u8, snippet, "OAuth") != null);
 }
