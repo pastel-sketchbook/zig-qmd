@@ -16,6 +16,10 @@ pub const Collection = struct {
     context: ?[]const u8,
 };
 
+pub const CollectionsResult = struct {
+    collections: std.ArrayList(Collection),
+};
+
 pub fn addCollection(
     db_: *db.Db,
     name: []const u8,
@@ -29,7 +33,7 @@ pub fn addCollection(
     _ = try stmt.step();
 }
 
-pub fn listCollections(db_: *db.Db) !struct { collections: std.ArrayList(Collection) } {
+pub fn listCollections(db_: *db.Db) !CollectionsResult {
     const sql = "SELECT name, path, pattern, ignore_patterns, include_by_default, update_command, context FROM store_collections ORDER BY name";
     var stmt = try db_.prepare(sql);
     defer stmt.finalize();
@@ -65,6 +69,18 @@ pub fn listCollections(db_: *db.Db) !struct { collections: std.ArrayList(Collect
     }
 
     return .{ .collections = collections };
+}
+
+pub fn freeCollections(result: *CollectionsResult) void {
+    for (result.collections.items) |col| {
+        std.heap.page_allocator.free(col.name);
+        std.heap.page_allocator.free(col.path);
+        std.heap.page_allocator.free(col.pattern);
+        if (col.ignore_patterns) |v| std.heap.page_allocator.free(v);
+        if (col.update_command) |v| std.heap.page_allocator.free(v);
+        if (col.context) |v| std.heap.page_allocator.free(v);
+    }
+    result.collections.deinit(std.heap.page_allocator);
 }
 
 pub fn getCollectionByName(db_: *db.Db, name: []const u8) !Collection {
@@ -133,7 +149,7 @@ test "listCollections returns all collections" {
     try addCollection(&db_, "docs", "/home/user/docs");
 
     var result = try listCollections(&db_);
-    defer result.collections.deinit(std.heap.page_allocator);
+    defer freeCollections(&result);
 
     try std.testing.expectEqual(@as(usize, 2), result.collections.items.len);
 }

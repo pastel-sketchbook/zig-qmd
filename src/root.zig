@@ -32,7 +32,7 @@ pub const Qmd = struct {
 
     pub fn update(self: *Qmd) !usize {
         var collections_result = try config.listCollections(&self.db);
-        defer collections_result.collections.deinit(std.heap.page_allocator);
+        defer config.freeCollections(&collections_result);
 
         var total_indexed: usize = 0;
         for (collections_result.collections.items) |col| {
@@ -121,7 +121,7 @@ test "Qmd open init add update search get" {
 
     try config.addCollection(&engine.db, "notes", "/tmp");
     var cols = try config.listCollections(&engine.db);
-    defer cols.collections.deinit(std.heap.page_allocator);
+    defer config.freeCollections(&cols);
     try std.testing.expect(cols.collections.items.len >= 1);
 
     try store.insertDocument(&engine.db, "notes", "a.md", "# A\n\nhello auth");

@@ -53,6 +53,7 @@ pub fn extractTitle(content: []const u8) []const u8 {
 
     var in_frontmatter = false;
     var frontmatter_started = false;
+    var frontmatter_title: ?[]const u8 = null;
 
     while (lines.next()) |line| {
         const trimmed = std.mem.trim(u8, line, &.{ ' ', '\t', '\r' });
@@ -64,8 +65,16 @@ pub fn extractTitle(content: []const u8) []const u8 {
         }
 
         if (in_frontmatter) {
+            if (std.mem.startsWith(u8, trimmed, "title:")) {
+                var v = std.mem.trim(u8, trimmed[6..], &.{ ' ', '\t' });
+                if (v.len >= 2 and v[0] == '"' and v[v.len - 1] == '"') {
+                    v = v[1 .. v.len - 1];
+                }
+                if (v.len > 0) frontmatter_title = v;
+            }
             if (std.mem.eql(u8, trimmed, "---")) {
                 in_frontmatter = false;
+                if (frontmatter_title) |t| return t;
             }
             continue;
         }
@@ -183,7 +192,7 @@ pub fn insertDocument(db_: *db.Db, collection: []const u8, path: []const u8, con
     const title = extractTitle(content);
     const now = "2024-01-01T00:00:00Z";
 
-    const sql = "INSERT INTO documents (collection, path, title, hash, created_at, modified_at, active) VALUES (?, ?, ?, ?, ?, ?, 1)";
+    const sql = "INSERT OR REPLACE INTO documents (collection, path, title, hash, created_at, modified_at, active) VALUES (?, ?, ?, ?, ?, ?, 1)";
     var stmt = try db_.prepare(sql);
     defer stmt.finalize();
     try stmt.bindText(1, collection);
@@ -321,6 +330,13 @@ test "extractTitle skips yaml frontmatter" {
     try std.testing.expectEqualStrings("Authentication", title);
 }
 
+test "extractTitle uses frontmatter title when present" {
+    const title = extractTitle(
+        "---\ntitle: \"Frontmatter Title\"\ncategory: docs\n---\n\n# Different Heading\nBody",
+    );
+    try std.testing.expectEqualStrings("Frontmatter Title", title);
+}
+
 test "extractTitle falls back to Untitled" {
     const title = extractTitle("\n\n\n");
     try std.testing.expectEqualStrings("Untitled", title);
@@ -441,6 +457,28 @@ test "upsertContentVectorAt stores multiple chunk vectors" {
     try stmt.bindText(1, doc.hash);
     try std.testing.expect(try stmt.step());
     try std.testing.expectEqual(@as(i64, 2), stmt.columnInt(0));
+}
+
+test "insertDocument replaces active row for same path" {
+    var db_ = try db.Db.open(":memory:");
+    defer db_.close();
+    try db.initSchema(&db_);
+
+    try insertDocument(&db_, "notes", "same.md", "---\ntitle: \"First\"\n---\n# First");
+    try insertDocument(&db_, "notes", "same.md", "---\ntitle: \"Second\"\n---\n# Second");
+
+    var stmt = try db_.prepare("SELECT count(*) FROM documents WHERE collection = 'notes' AND path = 'same.md' AND active = 1");
+    defer stmt.finalize();
+    try std.testing.expect(try stmt.step());
+    try std.testing.expectEqual(@as(i64, 1), stmt.columnInt(0));
+
+    const doc = try findActiveDocument(&db_, "notes", "same.md");
+    defer {
+        std.heap.page_allocator.free(doc.title);
+        std.heap.page_allocator.free(doc.hash);
+        std.heap.page_allocator.free(doc.doc);
+    }
+    try std.testing.expectEqualStrings("Second", doc.title);
 }
 
 test "cleanupOrphans removes inactive content and vectors" {

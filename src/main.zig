@@ -210,7 +210,7 @@ pub fn main() !void {
                 try stdout.flush();
                 return;
             };
-            defer result.collections.deinit(std.heap.page_allocator);
+            defer qmd.config.freeCollections(&result);
 
             if (result.collections.items.len == 0) {
                 try stdout.writeAll("No collections. Run 'zmd collection add <name> <path>'\n");
@@ -274,7 +274,7 @@ pub fn main() !void {
             try stdout.flush();
             return;
         };
-        defer collections_result.collections.deinit(std.heap.page_allocator);
+        defer qmd.config.freeCollections(&collections_result);
 
         var total_indexed: usize = 0;
         for (collections_result.collections.items) |col| {
@@ -1030,7 +1030,7 @@ pub fn main() !void {
                 try stdout.flush();
                 return;
             };
-            defer result.collections.deinit(std.heap.page_allocator);
+            defer qmd.config.freeCollections(&result);
 
             for (result.collections.items) |c_| {
                 try stdout.print("Collection: {s} ({s})\n", .{ c_.name, c_.path });
