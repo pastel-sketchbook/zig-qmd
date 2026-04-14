@@ -296,6 +296,8 @@ fn rerankByEmbedding(db_: *db.Db, query: []const u8, results: []ScoredResult) ![
 
     var passages = try allocator.alloc([]const u8, results.len);
     defer allocator.free(passages);
+    var base_scores = try allocator.alloc(f32, results.len);
+    defer allocator.free(base_scores);
 
     var rescored = try allocator.alloc(ScoredResult, results.len);
     for (results, 0..) |r, i| {
@@ -315,8 +317,12 @@ fn rerankByEmbedding(db_: *db.Db, query: []const u8, results: []ScoredResult) ![
         const d_emb = embed_text(source_text, false) catch q_emb;
         defer if (d_emb.ptr != q_emb.ptr) allocator.free(d_emb);
 
+        const cosine = llm.cosineSimilarity(q_emb, d_emb);
+        const dense_score = @max(@as(f32, 0), (cosine + 1.0) * 0.5); // normalize [-1,1] -> [0,1]
+        base_scores[i] = dense_score;
+
         var item = r;
-        item.score = llm.cosineSimilarity(q_emb, d_emb);
+        item.score = dense_score;
         rescored[i] = item;
     }
 
@@ -325,7 +331,24 @@ fn rerankByEmbedding(db_: *db.Db, query: []const u8, results: []ScoredResult) ![
 
     if (gen_scores) |scores| {
         for (rescored, 0..) |*r, i| {
-            r.score = r.score * 0.5 + @as(f64, scores[i]) * 0.5;
+            // Confidence-aware blend:
+            // - high generation confidence (near 0 or 1) gets more weight
+            // - uncertain generation (near 0.5) falls back to dense score
+            const g = @as(f32, @floatCast(@max(@as(f64, 0), @min(@as(f64, 1), scores[i]))));
+            const confidence = @abs(g - 0.5) * 2.0; // [0,1]
+            const gen_weight = 0.25 + 0.55 * confidence; // [0.25,0.80]
+            const dense_weight = 1.0 - gen_weight;
+            const blended = dense_weight * base_scores[i] + gen_weight * g;
+            r.score = blended;
+        }
+    } else {
+        // Small lexical prior to break ties when generation is unavailable.
+        const lexical = llm.rerankPassages(allocator, query, passages, null, null) catch null;
+        defer if (lexical) |s| allocator.free(s);
+        if (lexical) |ls| {
+            for (rescored, 0..) |*r, i| {
+                r.score = 0.85 * base_scores[i] + 0.15 * ls[i];
+            }
         }
     }
 
