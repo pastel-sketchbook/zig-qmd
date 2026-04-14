@@ -1346,6 +1346,66 @@ test "extractSnippet returns contextual content" {
     try std.testing.expect(std.mem.indexOf(u8, snippet, "OAuth") != null);
 }
 
+test "extractSnippet handles CJK Korean text" {
+    const doc = "주택임대차보호법에 의한 보증금 반환 청구권에 대하여";
+    const snippet = try extractSnippet(std.testing.allocator, "보증금", doc);
+    defer std.testing.allocator.free(snippet);
+    // Must find the Korean term in the snippet.
+    try std.testing.expect(std.mem.indexOf(u8, snippet, "보증금") != null);
+}
+
+test "extractSnippet CJK does not produce invalid UTF-8" {
+    // Build a long Korean document so slicing hits non-zero start offset.
+    const prefix = "가나다라마바사아자차카타파하" ** 5; // 14 chars * 3 bytes * 5 = 210 bytes
+    const doc = prefix ++ "보호법에 의한 보증금 반환 청구";
+    const snippet = try extractSnippet(std.testing.allocator, "보증금", doc);
+    defer std.testing.allocator.free(snippet);
+    // Validate the result is valid UTF-8 (won't panic on iteration).
+    var count: usize = 0;
+    const view = std.unicode.Utf8View.init(snippet) catch {
+        return error.TestExpectedEqual; // snippet is invalid UTF-8
+    };
+    var it = view.iterator();
+    while (it.nextCodepoint()) |_| count += 1;
+    try std.testing.expect(count > 0);
+    try std.testing.expect(std.mem.indexOf(u8, snippet, "보증금") != null);
+}
+
+test "utf8IndexOfInsensitive finds Korean text" {
+    const haystack = "주택임대차보호법에 의한 보증금";
+    const needle = "보호법";
+    const idx = utf8IndexOfInsensitive(haystack, needle);
+    try std.testing.expect(idx != null);
+    // The match should be at the correct position and the slice should equal the needle.
+    const start = idx.?;
+    try std.testing.expectEqualStrings(needle, haystack[start .. start + needle.len]);
+}
+
+test "utf8IndexOfInsensitive is case-insensitive for ASCII" {
+    const haystack = "Hello World OAuth Token";
+    const needle = "oauth";
+    const idx = utf8IndexOfInsensitive(haystack, needle);
+    try std.testing.expect(idx != null);
+    try std.testing.expectEqualStrings("OAuth", haystack[idx.? .. idx.? + 5]);
+}
+
+test "snapBackToCodepoint snaps correctly" {
+    // "가" in UTF-8 is 0xEA 0xB0 0x80 (3 bytes)
+    const data = "가나";
+    // Byte 1 is a continuation byte of "가"
+    try std.testing.expectEqual(@as(usize, 0), snapBackToCodepoint(data, 1));
+    // Byte 3 is the start of "나"
+    try std.testing.expectEqual(@as(usize, 3), snapBackToCodepoint(data, 3));
+}
+
+test "snapForwardToCodepoint snaps correctly" {
+    const data = "가나";
+    // Byte 1 is a continuation byte; should snap forward to byte 3 ("나")
+    try std.testing.expectEqual(@as(usize, 3), snapForwardToCodepoint(data, 1));
+    // Byte 0 is already a codepoint boundary
+    try std.testing.expectEqual(@as(usize, 0), snapForwardToCodepoint(data, 0));
+}
+
 test "parseSortFlag parses known sort orders" {
     try std.testing.expect(parseSortFlag("--sort=score").? == .score);
     try std.testing.expect(parseSortFlag("--sort=index").? == .index);
