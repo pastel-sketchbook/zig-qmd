@@ -1,6 +1,8 @@
 const std = @import("std");
 const qmd = @import("qmd");
 
+const DB_PATH = ".qmd/data.db";
+
 pub const McpError = error{
     ParseError,
     MethodNotFound,
@@ -79,25 +81,76 @@ pub const McpServer = struct {
     }
 
     fn listTools() []u8 {
-        return "{\"tools\":[{\"name\":\"query\",\"description\":\"Hybrid search\",\"inputSchema\":{\"type\":\"object\"}},{\"name\":\"search\",\"description\":\"FTS search\",\"inputSchema\":{\"type\":\"object\"}},{\"name\":\"get\",\"description\":\"Get document\",\"inputSchema\":{\"type\":\"object\"}},{\"name\":\"status\",\"description\":\"System status\",\"inputSchema\":{\"type\":\"object\"}}]}";
+        return "{\"tools\":[{\"name\":\"query\",\"description\":\"Hybrid search\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}}}},{\"name\":\"search\",\"description\":\"FTS search\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"collection\":{\"type\":\"string\"}}}},{\"name\":\"get\",\"description\":\"Get document\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}}}},{\"name\":\"status\",\"description\":\"System status\",\"inputSchema\":{\"type\":\"object\"}}]}";
     }
 
     fn callTool(params: []const u8) ![]u8 {
         const name = extractParam(params, "name") orelse return McpError.InvalidParams;
 
+        var db_path_buf: [256]u8 = undefined;
+        const db_path = std.fmt.bufPrintZ(&db_path_buf, "{s}", .{DB_PATH}) catch return McpError.InvalidParams;
+        var db_ = qmd.db.Db.open(db_path) catch {
+            return "{\"content\":[{\"type\":\"text\",\"text\":\"database not initialized\"}]}";
+        };
+        defer db_.close();
+
         if (std.mem.eql(u8, name, "query")) {
-            const query = extractParam(params, "query") orelse "unknown";
-            const result = try std.fmt.allocPrint(std.heap.page_allocator, "Query result for: {s}", .{query});
-            return try std.fmt.allocPrint(std.heap.page_allocator, "{{\"content\":[{{\"type\":\"text\",\"text\":\"{s}\"}}]}}", .{result});
+            const query_text = extractParam(params, "query") orelse "";
+            var result = qmd.search.hybridSearch(&db_, query_text, null, .{
+                .enable_vector = true,
+                .max_results = 5,
+            }) catch return "{\"content\":[{\"type\":\"text\",\"text\":\"query failed\"}]}";
+            defer result.results.deinit(std.heap.page_allocator);
+
+            var text = std.ArrayList(u8).initCapacity(std.heap.page_allocator, 256) catch return McpError.InvalidParams;
+            defer text.deinit(std.heap.page_allocator);
+            text.writer(std.heap.page_allocator).print("found {d} hybrid results", .{result.results.items.len}) catch {};
+            for (result.results.items, 0..) |r, i| {
+                text.writer(std.heap.page_allocator).print("\n{d}. {s} (qmd://{s}/{s}) score={d:.4}", .{ i + 1, r.title, r.collection, r.path, r.score }) catch {};
+            }
+            return std.fmt.allocPrint(std.heap.page_allocator, "{{\"content\":[{{\"type\":\"text\",\"text\":\"{s}\"}}]}}", .{text.items}) catch McpError.InvalidParams;
         }
         if (std.mem.eql(u8, name, "search")) {
-            return "{\"content\":[{\"type\":\"text\",\"text\":\"search results\"}]}";
+            const query_text = extractParam(params, "query") orelse "";
+            const collection = extractParam(params, "collection");
+            var result = qmd.search.searchFTS(&db_, query_text, collection) catch return "{\"content\":[{\"type\":\"text\",\"text\":\"search failed\"}]}";
+            defer result.results.deinit(std.heap.page_allocator);
+
+            var text = std.ArrayList(u8).initCapacity(std.heap.page_allocator, 256) catch return McpError.InvalidParams;
+            defer text.deinit(std.heap.page_allocator);
+            text.writer(std.heap.page_allocator).print("found {d} fts results", .{result.results.items.len}) catch {};
+            for (result.results.items, 0..) |r, i| {
+                text.writer(std.heap.page_allocator).print("\n{d}. {s} (qmd://{s}/{s}) score={d:.4}", .{ i + 1, r.title, r.collection, r.path, r.score }) catch {};
+            }
+            return std.fmt.allocPrint(std.heap.page_allocator, "{{\"content\":[{{\"type\":\"text\",\"text\":\"{s}\"}}]}}", .{text.items}) catch McpError.InvalidParams;
         }
         if (std.mem.eql(u8, name, "status")) {
-            return "{\"content\":[{\"type\":\"text\",\"text\":\"zmd status: OK\"}]}";
+            var stmt = db_.prepare("SELECT count(*) FROM documents WHERE active = 1") catch return "{\"content\":[{\"type\":\"text\",\"text\":\"status failed\"}]}";
+            defer stmt.finalize();
+            const has_docs = stmt.step() catch false;
+            const docs: i64 = if (has_docs) stmt.columnInt(0) else 0;
+            stmt = db_.prepare("SELECT count(*) FROM store_collections") catch return "{\"content\":[{\"type\":\"text\",\"text\":\"status failed\"}]}";
+            defer stmt.finalize();
+            const has_cols = stmt.step() catch false;
+            const cols: i64 = if (has_cols) stmt.columnInt(0) else 0;
+            const text = std.fmt.allocPrint(std.heap.page_allocator, "zmd status: OK, documents={d}, collections={d}", .{ docs, cols }) catch return McpError.InvalidParams;
+            return std.fmt.allocPrint(std.heap.page_allocator, "{{\"content\":[{{\"type\":\"text\",\"text\":\"{s}\"}}]}}", .{text}) catch McpError.InvalidParams;
         }
         if (std.mem.eql(u8, name, "get")) {
-            return "{\"content\":[{\"type\":\"text\",\"text\":\"document content\"}]}";
+            const raw_path = extractParam(params, "path") orelse return McpError.InvalidParams;
+            const parsed = qmd.parse_virtual_path(raw_path) orelse return McpError.InvalidParams;
+            const doc = qmd.store.findActiveDocument(&db_, parsed.collection, parsed.path) catch {
+                return "{\"content\":[{\"type\":\"text\",\"text\":\"document not found\"}]}";
+            };
+            defer {
+                std.heap.page_allocator.free(doc.title);
+                std.heap.page_allocator.free(doc.hash);
+                std.heap.page_allocator.free(doc.doc);
+            }
+            var text = std.ArrayList(u8).initCapacity(std.heap.page_allocator, doc.doc.len + 64) catch return McpError.InvalidParams;
+            defer text.deinit(std.heap.page_allocator);
+            text.writer(std.heap.page_allocator).print("Title: {s}\n\n{s}", .{ doc.title, doc.doc }) catch {};
+            return std.fmt.allocPrint(std.heap.page_allocator, "{{\"content\":[{{\"type\":\"text\",\"text\":\"{s}\"}}]}}", .{text.items}) catch McpError.InvalidParams;
         }
 
         return McpError.MethodNotFound;
