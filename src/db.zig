@@ -114,7 +114,7 @@ pub const Stmt = struct {
     }
 };
 
-/// Initialize the QMD database schema: pragma, tables, FTS5, triggers.
+/// Initialize the ZMD database schema: pragma, tables, FTS5, triggers.
 /// Mirrors the TypeScript `initializeDatabase()` from store.ts.
 pub fn initSchema(db: *Db) DbError!void {
     try db.exec("PRAGMA journal_mode = WAL");

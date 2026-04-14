@@ -9,7 +9,7 @@ pub const llm = @import("llm.zig");
 pub const mcp = @import("mcp.zig");
 pub const ast = @import("ast.zig");
 
-/// QMD library version, kept in sync with the VERSION file.
+/// ZMD library version, kept in sync with the VERSION file.
 pub const version = "0.1.0";
 
 pub const Qmd = struct {
@@ -135,7 +135,7 @@ test "parse_virtual_path handles zmd prefix" {
     try std.testing.expectEqualStrings("a.md", parsed.path);
 }
 
-test "Qmd open init add update search get" {
+test "ZMD open init add update search get" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
