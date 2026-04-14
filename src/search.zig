@@ -73,7 +73,10 @@ pub fn searchFTS(
     if (collection) |col| try stmt.bindText(2, col);
 
     var results = try std.ArrayList(SearchResult).initCapacity(std.heap.page_allocator, 0);
-    errdefer results.deinit(std.heap.page_allocator);
+    errdefer {
+        freeSearchResultSlice(results.items, std.heap.page_allocator);
+        results.deinit(std.heap.page_allocator);
+    }
 
     while (try stmt.step()) {
         const score_raw = stmt.columnDouble(5);
@@ -104,6 +107,11 @@ pub fn searchFTS(
 
 pub const SearchResults = struct {
     results: std.ArrayList(SearchResult),
+
+    pub fn deinit(self: *SearchResults, allocator: std.mem.Allocator) void {
+        freeSearchResultSlice(self.results.items, allocator);
+        self.results.deinit(allocator);
+    }
 };
 
 pub const SearchResult = struct {
@@ -173,6 +181,24 @@ pub const ScoredResult = struct {
     score: f64,
 };
 
+fn freeSearchResultSlice(items: []SearchResult, allocator: std.mem.Allocator) void {
+    for (items) |r| {
+        allocator.free(r.collection);
+        allocator.free(r.path);
+        allocator.free(r.title);
+        allocator.free(r.hash);
+    }
+}
+
+fn freeScoredResultSlice(items: []ScoredResult, allocator: std.mem.Allocator) void {
+    for (items) |r| {
+        allocator.free(r.collection);
+        allocator.free(r.path);
+        allocator.free(r.title);
+        allocator.free(r.hash);
+    }
+}
+
 pub fn hybridSearch(
     db_: *db.Db,
     query: []const u8,
@@ -218,7 +244,8 @@ pub fn hybridSearch(
         }
     }
 
-    const fts_result = try searchFTS(db_, effective_query, collection);
+    var fts_result = try searchFTS(db_, effective_query, collection);
+    defer fts_result.deinit(std.heap.page_allocator);
 
     var fts_scored = try std.ArrayList(ScoredResult).initCapacity(std.heap.page_allocator, fts_result.results.items.len);
     errdefer fts_scored.deinit(std.heap.page_allocator);
@@ -235,22 +262,32 @@ pub fn hybridSearch(
         const vec_result = try searchVec(db_, effective_query, collection);
         vec_scored = vec_result.results;
     }
+    defer {
+        freeScoredResultSlice(vec_scored, std.heap.page_allocator);
+        if (vec_scored.len > 0) std.heap.page_allocator.free(vec_scored);
+    }
 
     var lists: [2][]ScoredResult = undefined;
     lists[0] = fts_scored.items;
     lists[1] = vec_scored;
 
     var fused = try reciprocalRankFusion(&lists, options.rrf_k);
+    defer std.heap.page_allocator.free(fused);
 
     if (options.enable_rerank and fused.len > 1) {
         if (is_aborted(options.abort_signal)) {
             return .{ .results = try std.ArrayList(SearchResult).initCapacity(std.heap.page_allocator, 0), .fts_count = 0, .vec_count = 0 };
         }
-        fused = try rerankByEmbedding(db_, effective_query, fused);
+        const reranked = try rerankByEmbedding(db_, effective_query, fused);
+        std.heap.page_allocator.free(fused);
+        fused = reranked;
     }
 
     var final_results = try std.ArrayList(SearchResult).initCapacity(std.heap.page_allocator, @min(fused.len, options.max_results));
-    errdefer final_results.deinit(std.heap.page_allocator);
+    errdefer {
+        freeSearchResultSlice(final_results.items, std.heap.page_allocator);
+        final_results.deinit(std.heap.page_allocator);
+    }
 
     for (fused[0..@min(fused.len, options.max_results)]) |r| {
         var title = r.title;
@@ -265,7 +302,14 @@ pub fn hybridSearch(
             title = doc.title;
             hash = doc.hash;
         }
-        try final_results.append(std.heap.page_allocator, .{ .id = r.id, .collection = r.collection, .path = r.path, .title = title, .hash = hash, .score = r.score });
+        try final_results.append(std.heap.page_allocator, .{
+            .id = r.id,
+            .collection = try std.heap.page_allocator.dupe(u8, r.collection),
+            .path = try std.heap.page_allocator.dupe(u8, r.path),
+            .title = try std.heap.page_allocator.dupe(u8, title),
+            .hash = try std.heap.page_allocator.dupe(u8, hash),
+            .score = r.score,
+        });
     }
 
     return .{ .results = final_results, .fts_count = fts_scored.items.len, .vec_count = vec_scored.len };
@@ -298,10 +342,19 @@ fn rerankByEmbedding(db_: *db.Db, query: []const u8, results: []ScoredResult) ![
 
     var passages = try allocator.alloc([]const u8, results.len);
     defer allocator.free(passages);
+    var owned_passages = try allocator.alloc(?[]u8, results.len);
+    defer allocator.free(owned_passages);
+    for (owned_passages) |*slot| slot.* = null;
+    defer {
+        for (owned_passages) |entry| {
+            if (entry) |text| allocator.free(text);
+        }
+    }
     var base_scores = try allocator.alloc(f32, results.len);
     defer allocator.free(base_scores);
 
     var rescored = try allocator.alloc(ScoredResult, results.len);
+    errdefer allocator.free(rescored);
     for (results, 0..) |r, i| {
         var source_text = r.title;
         const doc = store.findActiveDocument(db_, r.collection, r.path) catch null;
@@ -314,7 +367,9 @@ fn rerankByEmbedding(db_: *db.Db, query: []const u8, results: []ScoredResult) ![
             source_text = d.doc;
         }
 
-        passages[i] = source_text;
+        const passage_copy = try allocator.dupe(u8, source_text);
+        owned_passages[i] = passage_copy;
+        passages[i] = passage_copy;
 
         const d_emb = embed_text(source_text, false) catch q_emb;
         defer if (d_emb.ptr != q_emb.ptr) allocator.free(d_emb);
@@ -367,6 +422,11 @@ pub const HybridResult = struct {
     results: std.ArrayList(SearchResult),
     fts_count: usize,
     vec_count: usize,
+
+    pub fn deinit(self: *HybridResult, allocator: std.mem.Allocator) void {
+        freeSearchResultSlice(self.results.items, allocator);
+        self.results.deinit(allocator);
+    }
 };
 
 pub fn searchVec(
@@ -613,7 +673,7 @@ test "hybridSearch with FTS only" {
     try store.insertDocument(&db_, "test", "b.md", "# Setup\nInstall");
 
     var result = try hybridSearch(&db_, "auth", null, .{ .enable_vector = false });
-    defer result.results.deinit(std.heap.page_allocator);
+    defer result.deinit(std.heap.page_allocator);
 
     try std.testing.expect(result.fts_count > 0);
 }
@@ -659,7 +719,7 @@ test "hybridSearch supports query expansion option" {
         .enable_rerank = false,
         .max_results = 10,
     });
-    defer result.results.deinit(std.heap.page_allocator);
+    defer result.deinit(std.heap.page_allocator);
 
     try std.testing.expect(result.fts_count >= 0);
 }
@@ -678,7 +738,7 @@ test "hybridSearch supports rerank option" {
         .enable_rerank = true,
         .max_results = 10,
     });
-    defer result.results.deinit(std.heap.page_allocator);
+    defer result.deinit(std.heap.page_allocator);
 
     try std.testing.expect(result.results.items.len > 0);
 }
@@ -695,7 +755,7 @@ test "hybridSearch supports abort signal" {
         .enable_vector = true,
         .abort_signal = &aborted,
     });
-    defer result.results.deinit(std.heap.page_allocator);
+    defer result.deinit(std.heap.page_allocator);
     try std.testing.expectEqual(@as(usize, 0), result.results.items.len);
 }
 

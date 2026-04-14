@@ -150,7 +150,7 @@ test "Qmd open init add update search get" {
 
     try store.insertDocument(&engine.db, "notes", "a.md", "# A\n\nhello auth");
     var res = try engine.search_fts("auth", null);
-    defer res.results.deinit(std.heap.page_allocator);
+    defer res.deinit(std.heap.page_allocator);
     try std.testing.expect(res.results.items.len >= 1);
 
     const doc = try engine.get("notes", "a.md");
