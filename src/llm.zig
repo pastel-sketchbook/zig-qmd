@@ -1,5 +1,5 @@
 const std = @import("std");
-const ChildProcess = std.process.Child;
+const Io = std.Io;
 const db = @import("db.zig");
 
 /// Error set for llama.cpp integration operations.
@@ -22,8 +22,8 @@ pub const LlamaCpp = struct {
     model_path: []const u8,
     embedding_dim: usize = 384,
     loaded: bool = false,
-    temp_dir: ?std.fs.Dir = null,
-    pid: ?ChildProcess.Id = null,
+    temp_dir: ?std.Io.Dir = null,
+    pid: ?std.process.Child.Id = null,
 
     /// Creates a LlamaCpp instance, checking if the model file exists.
     pub fn init(model_path: []const u8, _: std.mem.Allocator) LlamaError!LlamaCpp {
@@ -32,12 +32,13 @@ pub const LlamaCpp = struct {
             .loaded = false,
         };
 
-        // Check if model file exists
-        const file = std.fs.cwd().openFile(model_path, .{}) catch {
+        // Check if model file exists using posix openat
+        const cwd_fd = std.Io.Dir.cwd().handle;
+        const fd = std.posix.openat(cwd_fd, model_path, .{}, 0) catch {
             // Model not found, will use fallback
             return self;
         };
-        file.close();
+        std.Io.Threaded.closeFd(fd);
 
         // Model exists - ready for real embeddings
         self.loaded = true;
@@ -48,8 +49,9 @@ pub const LlamaCpp = struct {
 
     /// Releases resources held by the LlamaCpp instance.
     pub fn deinit(self: *LlamaCpp) void {
-        if (self.temp_dir) |*dir| {
-            dir.close();
+        if (self.temp_dir) |dir| {
+            std.Io.Threaded.closeFd(dir.handle);
+            self.temp_dir = null;
         }
         self.loaded = false;
     }
@@ -113,15 +115,17 @@ pub const ChatMessage = struct {
 /// Multi-turn chat session backed by a llama.cpp generation subprocess.
 pub const LlamaChatSession = struct {
     allocator: std.mem.Allocator,
+    io: Io,
     binary_path: []u8,
     model_path: []u8,
     history: std.ArrayList(ChatMessage),
     max_history: usize = 12,
 
     /// Creates a new chat session with paths to binary and model.
-    pub fn init(allocator: std.mem.Allocator, binary_path: []const u8, model_path: []const u8) !LlamaChatSession {
+    pub fn init(allocator: std.mem.Allocator, io: Io, binary_path: []const u8, model_path: []const u8) !LlamaChatSession {
         return .{
             .allocator = allocator,
+            .io = io,
             .binary_path = try allocator.dupe(u8, binary_path),
             .model_path = try allocator.dupe(u8, model_path),
             .history = try std.ArrayList(ChatMessage).initCapacity(allocator, 8),
@@ -148,7 +152,7 @@ pub const LlamaChatSession = struct {
         const prompt = try self.buildPrompt();
         defer self.allocator.free(prompt);
 
-        const response = runGeneration(self.allocator, self.binary_path, self.model_path, prompt) catch try self.allocator.dupe(u8, "Model unavailable");
+        const response = runGeneration(self.allocator, self.io, self.binary_path, self.model_path, prompt) catch try self.allocator.dupe(u8, "Model unavailable");
         try self.appendOwnedMessage(.assistant, response);
         return try self.allocator.dupe(u8, response);
     }
@@ -175,7 +179,10 @@ pub const LlamaChatSession = struct {
                 .user => "user",
                 .assistant => "assistant",
             };
-            try out.writer(self.allocator).print("{s}: {s}\n", .{ prefix, msg.content });
+            try out.appendSlice(self.allocator, prefix);
+            try out.appendSlice(self.allocator, ": ");
+            try out.appendSlice(self.allocator, msg.content);
+            try out.append(self.allocator, '\n');
         }
         try out.appendSlice(self.allocator, "assistant:");
         return out.toOwnedSlice(self.allocator);
@@ -185,6 +192,7 @@ pub const LlamaChatSession = struct {
 /// Scores passages for relevance to a query using generation or lexical fallback.
 pub fn rerankPassages(
     allocator: std.mem.Allocator,
+    io: Io,
     query: []const u8,
     passages: []const []const u8,
     maybe_binary_path: ?[]const u8,
@@ -193,7 +201,7 @@ pub fn rerankPassages(
     var scores = try allocator.alloc(f32, passages.len);
     for (passages, 0..) |p, i| {
         const generated = if (maybe_binary_path != null and maybe_model_path != null)
-            scoreWithGeneration(allocator, query, p, maybe_binary_path.?, maybe_model_path.?)
+            scoreWithGeneration(allocator, io, query, p, maybe_binary_path.?, maybe_model_path.?)
         else
             null;
 
@@ -206,7 +214,7 @@ pub fn rerankPassages(
     return scores;
 }
 
-fn runGeneration(allocator: std.mem.Allocator, binary_path: []const u8, model_path: []const u8, prompt: []const u8) ![]u8 {
+fn runGeneration(allocator: std.mem.Allocator, io: Io, binary_path: []const u8, model_path: []const u8, prompt: []const u8) ![]u8 {
     if (binary_path.len == 0 or model_path.len == 0) return error.SpawnFailed;
 
     var argv = try std.ArrayList([]const u8).initCapacity(allocator, 16);
@@ -233,25 +241,24 @@ fn runGeneration(allocator: std.mem.Allocator, binary_path: []const u8, model_pa
     try argv.append(allocator, "-p");
     try argv.append(allocator, prompt);
 
-    const run_result = std.process.Child.run(.{
-        .allocator = allocator,
+    const run_result = std.process.run(allocator, io, .{
         .argv = argv.items,
-        .max_output_bytes = 64 * 1024,
+        .stdout_limit = @enumFromInt(64 * 1024),
     }) catch return error.SpawnFailed;
     defer allocator.free(run_result.stderr);
     defer allocator.free(run_result.stdout);
 
-    if (run_result.term != .Exited or run_result.term.Exited != 0) return error.SpawnFailed;
+    if (run_result.term != .exited or run_result.term.exited != 0) return error.SpawnFailed;
     const trimmed = std.mem.trim(u8, run_result.stdout, &.{ ' ', '\n', '\r', '\t' });
     if (trimmed.len == 0) return error.SpawnFailed;
     return allocator.dupe(u8, trimmed);
 }
 
-fn scoreWithGeneration(allocator: std.mem.Allocator, query: []const u8, passage: []const u8, binary_path: []const u8, model_path: []const u8) ?f32 {
+fn scoreWithGeneration(allocator: std.mem.Allocator, io: Io, query: []const u8, passage: []const u8, binary_path: []const u8, model_path: []const u8) ?f32 {
     const prompt = std.fmt.allocPrint(allocator, "Rate relevance from 0 to 1.\nQuery: {s}\nPassage: {s}\nScore:", .{ query, passage }) catch return null;
     defer allocator.free(prompt);
 
-    const out = runGeneration(allocator, binary_path, model_path, prompt) catch return null;
+    const out = runGeneration(allocator, io, binary_path, model_path, prompt) catch return null;
     defer allocator.free(out);
 
     var tok = std.mem.tokenizeAny(u8, out, " \n\r\t,:;");
@@ -492,13 +499,14 @@ pub fn rerank(results: []const SimpleResult, query: []const u8) ![]SimpleResult 
 }
 
 /// Expands a search query with related terms using a model or heuristic fallback.
-pub fn expandQuery(allocator: std.mem.Allocator, query: []const u8) ![]const u8 {
-    return expandQueryWithModel(allocator, query, null, null) catch expandQueryHeuristic(allocator, query);
+pub fn expandQuery(allocator: std.mem.Allocator, io: Io, query: []const u8) ![]const u8 {
+    return expandQueryWithModel(allocator, io, query, null, null) catch expandQueryHeuristic(allocator, query);
 }
 
 /// Expands a query using a llama.cpp generation subprocess or heuristic fallback.
 pub fn expandQueryWithModel(
     allocator: std.mem.Allocator,
+    io: Io,
     query: []const u8,
     maybe_binary_path: ?[]const u8,
     maybe_model_path: ?[]const u8,
@@ -538,15 +546,14 @@ pub fn expandQueryWithModel(
     try argv.append(allocator, "-p");
     try argv.append(allocator, prompt);
 
-    const run_result = std.process.Child.run(.{
-        .allocator = allocator,
+    const run_result = std.process.run(allocator, io, .{
         .argv = argv.items,
-        .max_output_bytes = 16 * 1024,
+        .stdout_limit = @enumFromInt(16 * 1024),
     }) catch return expandQueryHeuristic(allocator, query);
     defer allocator.free(run_result.stdout);
     defer allocator.free(run_result.stderr);
 
-    if (run_result.term != .Exited or run_result.term.Exited != 0 or run_result.stdout.len == 0) {
+    if (run_result.term != .exited or run_result.term.exited != 0 or run_result.stdout.len == 0) {
         return expandQueryHeuristic(allocator, query);
     }
 
@@ -585,7 +592,7 @@ test "cosineSimilarity orthogonal" {
 }
 
 test "expandQuery adds question terms" {
-    const expanded = try expandQuery(std.testing.allocator, "how to login");
+    const expanded = try expandQuery(std.testing.allocator, std.testing.io, "how to login");
     defer std.testing.allocator.free(expanded);
     try std.testing.expect(std.mem.indexOf(u8, expanded, "method").? > 0);
 }
@@ -683,9 +690,11 @@ pub fn parseModelSpec(model_path: []const u8) EmbeddingError!ModelSpec {
 pub fn validateModelPath(model_path: []const u8) EmbeddingError!void {
     const model_spec = try parseModelSpec(model_path);
     if (model_spec.source == .local) {
-        std.fs.cwd().access(model_spec.value, .{ .mode = .read_only }) catch {
+        const cwd_fd = std.Io.Dir.cwd().handle;
+        const fd = std.posix.openat(cwd_fd, model_spec.value, .{}, 0) catch {
             return EmbeddingError.ModelNotFound;
         };
+        std.Io.Threaded.closeFd(fd);
     }
 }
 
@@ -696,19 +705,23 @@ pub const LlamaEmbedding = struct {
     embedding_dim: usize,
     normalize: i8 = 2, // L2 normalization by default
     allocator: std.mem.Allocator,
+    io: Io,
 
     const Self = @This();
 
     /// Initialize the embedding engine with paths to binary and model
     pub fn init(
         allocator: std.mem.Allocator,
+        io: Io,
         binary_path: []const u8,
         model_path: []const u8,
     ) EmbeddingError!Self {
         // Validate binary path exists (runtime spawn will verify execution)
-        std.fs.cwd().access(binary_path, .{ .mode = .read_only }) catch {
+        const cwd_fd = std.Io.Dir.cwd().handle;
+        const fd = std.posix.openat(cwd_fd, binary_path, .{}, 0) catch {
             return EmbeddingError.BinaryNotFound;
         };
+        std.Io.Threaded.closeFd(fd);
 
         try validateModelPath(model_path);
 
@@ -721,6 +734,7 @@ pub const LlamaEmbedding = struct {
             .model_path = model_copy,
             .embedding_dim = 384, // Default, will be determined from model
             .allocator = allocator,
+            .io = io,
         };
     }
 
@@ -798,15 +812,14 @@ pub const LlamaEmbedding = struct {
         try argv.append(self.allocator, "-p");
         try argv.append(self.allocator, prompt.items);
 
-        const run_result = std.process.Child.run(.{
-            .allocator = self.allocator,
+        const run_result = std.process.run(self.allocator, self.io, .{
             .argv = argv.items,
-            .max_output_bytes = 10 * 1024 * 1024,
+            .stdout_limit = @enumFromInt(10 * 1024 * 1024),
         }) catch return EmbeddingError.SpawnFailed;
         defer self.allocator.free(run_result.stdout);
         defer self.allocator.free(run_result.stderr);
 
-        if (run_result.term != .Exited or run_result.term.Exited != 0) {
+        if (run_result.term != .exited or run_result.term.exited != 0) {
             return EmbeddingError.ProcessFailed;
         }
 
@@ -884,6 +897,7 @@ test "LlamaEmbedding.init fails with non-existent binary" {
     const allocator = std.testing.allocator;
     const result = LlamaEmbedding.init(
         allocator,
+        std.testing.io,
         "/nonexistent/llama-embedding",
         "/some/model.gguf",
     );
@@ -895,6 +909,7 @@ test "LlamaEmbedding.init fails with non-existent model" {
     // Use a binary that exists (the test runner itself)
     const result = LlamaEmbedding.init(
         allocator,
+        std.testing.io,
         "/bin/sh", // exists on all Unix systems
         "/nonexistent/model.gguf",
     );
@@ -905,6 +920,7 @@ test "LlamaEmbedding.init accepts hf remote model spec" {
     const allocator = std.testing.allocator;
     var engine = try LlamaEmbedding.init(
         allocator,
+        std.testing.io,
         "/bin/sh",
         "hf://ggml-org/embeddinggemma-300M-qat-q4_0-GGUF:Q4_0",
     );
@@ -961,6 +977,7 @@ test "LlamaEmbedding.embedBatch returns empty result for empty input" {
 
     var engine = try LlamaEmbedding.init(
         allocator,
+        std.testing.io,
         "/bin/sh",
         "VERSION",
     );
@@ -977,6 +994,7 @@ test "LlamaEmbedding.embed returns process error when subprocess fails" {
 
     var engine = try LlamaEmbedding.init(
         allocator,
+        std.testing.io,
         "/bin/sh",
         "VERSION",
     );
@@ -1007,7 +1025,7 @@ test "cachePut and cacheGet roundtrip" {
 }
 
 test "LlamaChatSession stores bounded history" {
-    var session = try LlamaChatSession.init(std.testing.allocator, "/bin/false", "/tmp/none.gguf");
+    var session = try LlamaChatSession.init(std.testing.allocator, std.testing.io, "/bin/false", "/tmp/none.gguf");
     defer session.deinit();
 
     session.max_history = 3;
@@ -1026,7 +1044,7 @@ test "rerankPassages falls back without model" {
         "OAuth login and token refresh",
         "Pasta and olive oil recipe",
     };
-    const scores = try rerankPassages(std.testing.allocator, "oauth token", passages, null, null);
+    const scores = try rerankPassages(std.testing.allocator, std.testing.io, "oauth token", passages, null, null);
     defer std.testing.allocator.free(scores);
     try std.testing.expect(scores.len == 2);
     try std.testing.expect(scores[0] >= scores[1]);

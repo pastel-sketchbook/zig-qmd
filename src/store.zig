@@ -254,7 +254,9 @@ pub fn upsertContentVectorAt(
     try emb_json.append(allocator, '[');
     for (embedding, 0..) |v, i| {
         if (i > 0) try emb_json.append(allocator, ',');
-        try emb_json.writer(allocator).print("{d}", .{v});
+        var buf: [32]u8 = undefined;
+        const formatted = std.fmt.bufPrint(&buf, "{d}", .{v}) catch continue;
+        try emb_json.appendSlice(allocator, formatted);
     }
     try emb_json.append(allocator, ']');
 

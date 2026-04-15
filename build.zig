@@ -13,7 +13,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-    sqlite.addCSourceFile(.{
+    sqlite.root_module.addCSourceFile(.{
         .file = b.path("deps/sqlite3.c"),
         .flags = &.{
             "-DSQLITE_ENABLE_FTS5",
@@ -23,7 +23,7 @@ pub fn build(b: *std.Build) void {
             "-fno-sanitize=undefined", // SQLite has known-benign UB (FTS5 Porter stemmer shifts)
         },
     });
-    sqlite.addCSourceFile(.{
+    sqlite.root_module.addCSourceFile(.{
         .file = b.path("deps/sqlite-vec.c"),
         .flags = &.{
             "-DSQLITE_CORE",
@@ -47,12 +47,12 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-    treesitter.addIncludePath(b.path("deps/tree-sitter"));
-    treesitter.addIncludePath(b.path("deps/tree-sitter/src"));
-    treesitter.addIncludePath(b.path("deps/tree-sitter-markdown"));
-    treesitter.addCSourceFile(.{ .file = b.path("deps/tree-sitter/src/lib.c"), .flags = &.{} });
-    treesitter.addCSourceFile(.{ .file = b.path("deps/tree-sitter-markdown/parser.c"), .flags = &.{} });
-    treesitter.addCSourceFile(.{ .file = b.path("deps/tree-sitter-markdown/scanner.c"), .flags = &.{} });
+    treesitter.root_module.addIncludePath(b.path("deps/tree-sitter"));
+    treesitter.root_module.addIncludePath(b.path("deps/tree-sitter/src"));
+    treesitter.root_module.addIncludePath(b.path("deps/tree-sitter-markdown"));
+    treesitter.root_module.addCSourceFile(.{ .file = b.path("deps/tree-sitter/src/lib.c"), .flags = &.{} });
+    treesitter.root_module.addCSourceFile(.{ .file = b.path("deps/tree-sitter-markdown/parser.c"), .flags = &.{} });
+    treesitter.root_module.addCSourceFile(.{ .file = b.path("deps/tree-sitter-markdown/scanner.c"), .flags = &.{} });
 
     // --- Library module (SDK) ---
     const mod = b.addModule("qmd", .{
@@ -78,8 +78,8 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    exe.linkLibrary(sqlite);
-    exe.linkLibrary(treesitter);
+    exe.root_module.linkLibrary(sqlite);
+    exe.root_module.linkLibrary(treesitter);
 
     b.installArtifact(exe);
 

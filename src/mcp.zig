@@ -43,20 +43,20 @@ const ParsedToolCall = struct {
 pub const McpServer = struct {
     /// Run the MCP server loop, reading requests from stdin and writing responses to stdout.
     /// The caller must provide an allocator for all dynamic memory used during the session.
-    pub fn run(allocator: std.mem.Allocator) !void {
+    pub fn run(allocator: std.mem.Allocator, io: std.Io) !void {
         var stdin_buffer: [4096]u8 = undefined;
-        var stdin_reader = std.fs.File.stdin().reader(&stdin_buffer);
+        var stdin_reader = std.Io.File.stdin().reader(io, &stdin_buffer);
         const stdin = &stdin_reader.interface;
 
         var stdout_buffer: [4096]u8 = undefined;
-        var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+        var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
         const stdout = &stdout_writer.interface;
 
         while (true) {
             const msg = readMessage(stdin, allocator) catch break;
             defer allocator.free(msg);
 
-            const response = handleRequestWithDbPath(msg, null, allocator) catch |err| {
+            const response = handleRequestWithDbPath(msg, null, allocator, io) catch |err| {
                 const err_json = std.fmt.allocPrint(
                     allocator,
                     "{{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{{\"code\":-32600,\"message\":\"{s}\"}}}}",
@@ -105,11 +105,11 @@ pub const McpServer = struct {
         try stdout.flush();
     }
 
-    fn handleRequest(request: []const u8, allocator: std.mem.Allocator) ![]u8 {
-        return handleRequestWithDbPath(request, null, allocator);
+    fn handleRequest(request: []const u8, allocator: std.mem.Allocator, io: std.Io) ![]u8 {
+        return handleRequestWithDbPath(request, null, allocator, io);
     }
 
-    fn handleRequestWithDbPath(request: []const u8, db_path_override: ?[]const u8, allocator: std.mem.Allocator) ![]u8 {
+    fn handleRequestWithDbPath(request: []const u8, db_path_override: ?[]const u8, allocator: std.mem.Allocator, io: std.Io) ![]u8 {
         var parsed = try parseRequest(request, allocator);
         defer parsed.deinit(allocator);
 
@@ -120,7 +120,7 @@ pub const McpServer = struct {
             const params = parsed.params_json orelse return McpError.InvalidParams;
             var tool_call = try parseToolCall(params, allocator);
             defer tool_call.deinit(allocator);
-            return try formatResponse(parsed.id_json, try callToolNamedAtPath(&tool_call, db_path_override orelse DB_PATH, allocator), allocator);
+            return try formatResponse(parsed.id_json, try callToolNamedAtPath(&tool_call, db_path_override orelse DB_PATH, allocator, io), allocator);
         }
         if (std.mem.eql(u8, parsed.method, "initialize")) {
             return try formatResponse(parsed.id_json, getServerInfo(), allocator);
@@ -178,7 +178,7 @@ pub const McpServer = struct {
         return callToolNamedAtPath(&tool_call, DB_PATH, allocator);
     }
 
-    fn callToolNamedAtPath(tool_call: *const ParsedToolCall, db_path_raw: []const u8, allocator: std.mem.Allocator) ![]u8 {
+    fn callToolNamedAtPath(tool_call: *const ParsedToolCall, db_path_raw: []const u8, allocator: std.mem.Allocator, io: std.Io) ![]u8 {
         const db_path = allocator.dupeZ(u8, db_path_raw) catch return McpError.InvalidParams;
         defer allocator.free(db_path);
 
@@ -189,7 +189,7 @@ pub const McpServer = struct {
 
         if (std.mem.eql(u8, tool_call.name, "query")) {
             const query_text = tool_call.query orelse "";
-            var result = search.hybridSearch(&db_, allocator, query_text, null, .{
+            var result = search.hybridSearch(&db_, allocator, io, query_text, null, .{
                 .enable_vector = true,
                 .max_results = 5,
             }) catch return allocator.dupe(u8, "{\"content\":[{\"type\":\"text\",\"text\":\"query failed\"}]}") catch McpError.InvalidParams;
@@ -197,9 +197,15 @@ pub const McpServer = struct {
 
             var text = std.ArrayList(u8).initCapacity(allocator, 256) catch return McpError.InvalidParams;
             defer text.deinit(allocator);
-            try text.writer(allocator).print("found {d} hybrid results", .{result.results.items.len});
+            {
+                const s = std.fmt.allocPrint(allocator, "found {d} hybrid results", .{result.results.items.len}) catch return McpError.InvalidParams;
+                defer allocator.free(s);
+                text.appendSlice(allocator, s) catch return McpError.InvalidParams;
+            }
             for (result.results.items, 0..) |r, i| {
-                try text.writer(allocator).print("\n{d}. {s} (zmd://{s}/{s}) score={d:.4}", .{ i + 1, r.title, r.collection, r.path, r.score });
+                const s = std.fmt.allocPrint(allocator, "\n{d}. {s} (zmd://{s}/{s}) score={d:.4}", .{ i + 1, r.title, r.collection, r.path, r.score }) catch continue;
+                defer allocator.free(s);
+                text.appendSlice(allocator, s) catch continue;
             }
             return std.fmt.allocPrint(allocator, "{{\"content\":[{{\"type\":\"text\",\"text\":\"{s}\"}}]}}", .{text.items}) catch McpError.InvalidParams;
         }
@@ -211,9 +217,15 @@ pub const McpServer = struct {
 
             var text = std.ArrayList(u8).initCapacity(allocator, 256) catch return McpError.InvalidParams;
             defer text.deinit(allocator);
-            try text.writer(allocator).print("found {d} fts results", .{result.results.items.len});
+            {
+                const s = std.fmt.allocPrint(allocator, "found {d} fts results", .{result.results.items.len}) catch return McpError.InvalidParams;
+                defer allocator.free(s);
+                text.appendSlice(allocator, s) catch return McpError.InvalidParams;
+            }
             for (result.results.items, 0..) |r, i| {
-                try text.writer(allocator).print("\n{d}. {s} (zmd://{s}/{s}) score={d:.4}", .{ i + 1, r.title, r.collection, r.path, r.score });
+                const s = std.fmt.allocPrint(allocator, "\n{d}. {s} (zmd://{s}/{s}) score={d:.4}", .{ i + 1, r.title, r.collection, r.path, r.score }) catch continue;
+                defer allocator.free(s);
+                text.appendSlice(allocator, s) catch continue;
             }
             return std.fmt.allocPrint(allocator, "{{\"content\":[{{\"type\":\"text\",\"text\":\"{s}\"}}]}}", .{text.items}) catch McpError.InvalidParams;
         }
@@ -243,7 +255,10 @@ pub const McpServer = struct {
             }
             var text = std.ArrayList(u8).initCapacity(allocator, doc.doc.len + 64) catch return McpError.InvalidParams;
             defer text.deinit(allocator);
-            try text.writer(allocator).print("Title: {s}\n\n{s}", .{ doc.title, doc.doc });
+            try text.appendSlice(allocator, "Title: ");
+            try text.appendSlice(allocator, doc.title);
+            try text.appendSlice(allocator, "\n\n");
+            try text.appendSlice(allocator, doc.doc);
             return std.fmt.allocPrint(allocator, "{{\"content\":[{{\"type\":\"text\",\"text\":\"{s}\"}}]}}", .{text.items}) catch McpError.InvalidParams;
         }
 
@@ -337,24 +352,24 @@ test "parseToolCall parses MCP arguments object" {
 test "handleRequest supports ping" {
     const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}";
     const allocator = std.testing.allocator;
-    const resp = try McpServer.handleRequest(req, allocator);
+    const resp = try McpServer.handleRequest(req, allocator, std.testing.io);
     defer allocator.free(resp);
     try std.testing.expect(std.mem.indexOf(u8, resp, "pong") != null);
 }
 
 test "handleRequest rejects missing id" {
     const req = "{\"jsonrpc\":\"2.0\",\"method\":\"ping\"}";
-    try std.testing.expectError(McpError.ParseError, McpServer.handleRequest(req, std.testing.allocator));
+    try std.testing.expectError(McpError.ParseError, McpServer.handleRequest(req, std.testing.allocator, std.testing.io));
 }
 
 test "handleRequest rejects non-2.0 jsonrpc" {
     const req = "{\"jsonrpc\":\"1.0\",\"id\":1,\"method\":\"ping\"}";
-    try std.testing.expectError(McpError.ParseError, McpServer.handleRequest(req, std.testing.allocator));
+    try std.testing.expectError(McpError.ParseError, McpServer.handleRequest(req, std.testing.allocator, std.testing.io));
 }
 
 test "handleRequest rejects malformed params in tools/call" {
     const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":\"oops\"}";
-    try std.testing.expectError(McpError.InvalidParams, McpServer.handleRequest(req, std.testing.allocator));
+    try std.testing.expectError(McpError.InvalidParams, McpServer.handleRequest(req, std.testing.allocator, std.testing.io));
 }
 
 test "handleRequest returns method error for unknown tool" {
@@ -364,7 +379,7 @@ test "handleRequest returns method error for unknown tool" {
     defer allocator.free(db_path);
 
     const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"unknown\"}}";
-    try std.testing.expectError(McpError.MethodNotFound, McpServer.handleRequestWithDbPath(req, db_path, allocator));
+    try std.testing.expectError(McpError.MethodNotFound, McpServer.handleRequestWithDbPath(req, db_path, allocator, std.testing.io));
 }
 
 const FakeReader = struct {
@@ -452,7 +467,7 @@ fn processFramedRequestForTest(request_body: []const u8, db_path_override: ?[]co
     const parsed = try McpServer.readMessage(&reader, allocator);
     defer allocator.free(parsed);
 
-    const response = try McpServer.handleRequestWithDbPath(parsed, db_path_override, allocator);
+    const response = try McpServer.handleRequestWithDbPath(parsed, db_path_override, allocator, std.testing.io);
     defer allocator.free(response);
 
     var outbound = try std.ArrayList(u8).initCapacity(allocator, 0);

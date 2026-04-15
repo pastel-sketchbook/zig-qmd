@@ -1,4 +1,5 @@
 const std = @import("std");
+const Io = std.Io;
 
 /// Returns true if the path looks like a remote git URL.
 /// Recognizes https:// URLs (GitHub, GitLab, etc.) and git@ SSH URLs.
@@ -46,41 +47,35 @@ pub const RemoteError = error{
 /// Clones or updates a remote repository to the local cache directory.
 /// Uses `git clone --depth=1` for initial clone, `git pull` for updates.
 /// Returns the local cache path.
-pub fn syncRemote(allocator: std.mem.Allocator, url: []const u8) RemoteError![]u8 {
+pub fn syncRemote(allocator: std.mem.Allocator, io: Io, url: []const u8) RemoteError![]u8 {
     const local_path = try cachePath(allocator, url);
     errdefer allocator.free(local_path);
 
     // Ensure parent directory exists
-    std.fs.cwd().makePath(".qmd/repos") catch {};
+    std.Io.Dir.cwd().createDirPath(io, ".qmd/repos") catch {};
 
     // Check if already cloned
-    const stat = std.fs.cwd().statFile(local_path) catch null;
-    _ = stat;
-
     var dir_exists = true;
-    std.fs.cwd().access(local_path, .{}) catch {
+    std.Io.Dir.cwd().access(io, local_path, .{}) catch {
         dir_exists = false;
     };
 
     if (dir_exists) {
         // Pull updates
-        var pull = std.process.Child.init(
-            &.{ "git", "-C", local_path, "pull", "--ff-only" },
-            allocator,
-        );
-        pull.stderr_behavior = .Ignore;
-        pull.stdout_behavior = .Ignore;
-        _ = pull.spawnAndWait() catch return RemoteError.PullFailed;
+        const result = std.process.run(allocator, io, .{
+            .argv = &.{ "git", "-C", local_path, "pull", "--ff-only" },
+        }) catch return RemoteError.PullFailed;
+        allocator.free(result.stdout);
+        allocator.free(result.stderr);
+        if (result.term != .exited or result.term.exited != 0) return RemoteError.PullFailed;
     } else {
         // Fresh shallow clone
-        var clone = std.process.Child.init(
-            &.{ "git", "clone", "--depth=1", url, local_path },
-            allocator,
-        );
-        clone.stderr_behavior = .Ignore;
-        clone.stdout_behavior = .Ignore;
-        const term = clone.spawnAndWait() catch return RemoteError.CloneFailed;
-        if (term.Exited != 0) return RemoteError.CloneFailed;
+        const result = std.process.run(allocator, io, .{
+            .argv = &.{ "git", "clone", "--depth=1", url, local_path },
+        }) catch return RemoteError.CloneFailed;
+        allocator.free(result.stdout);
+        allocator.free(result.stderr);
+        if (result.term != .exited or result.term.exited != 0) return RemoteError.CloneFailed;
     }
 
     return local_path;

@@ -1,8 +1,6 @@
 const std = @import("std");
 const qmd = @import("qmd");
 
-var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-
 const DB_PATH = ".qmd/data.db";
 const DEFAULT_LLAMA_EMBED_BIN = "deps/llama.cpp/build/bin/llama-embedding";
 const DEFAULT_LLAMA_MODEL_PATH = "";
@@ -181,39 +179,27 @@ fn snapForwardToCodepoint(data: []const u8, pos: usize) usize {
     return p;
 }
 
-fn make_embedding_engine(allocator: std.mem.Allocator) ?qmd.llm.LlamaEmbedding {
-    const bin_path = std.process.getEnvVarOwned(allocator, "QMD_LLAMA_EMBED_BIN") catch allocator.dupe(u8, DEFAULT_LLAMA_EMBED_BIN) catch return null;
-
-    const model_path = std.process.getEnvVarOwned(allocator, "QMD_LLAMA_MODEL") catch allocator.dupe(u8, DEFAULT_LLAMA_MODEL_PATH) catch {
-        allocator.free(bin_path);
-        return null;
-    };
+fn make_embedding_engine(allocator: std.mem.Allocator, io: std.Io, environ: *std.process.Environ.Map) ?qmd.llm.LlamaEmbedding {
+    const bin_path = environ.get("QMD_LLAMA_EMBED_BIN") orelse DEFAULT_LLAMA_EMBED_BIN;
+    const model_path = environ.get("QMD_LLAMA_MODEL") orelse DEFAULT_LLAMA_MODEL_PATH;
 
     if (model_path.len == 0) {
-        allocator.free(bin_path);
-        allocator.free(model_path);
         return null;
     }
 
-    defer {
-        allocator.free(bin_path);
-        allocator.free(model_path);
-    }
-
-    return qmd.llm.LlamaEmbedding.init(allocator, bin_path, model_path) catch null;
+    return qmd.llm.LlamaEmbedding.init(allocator, io, bin_path, model_path) catch null;
 }
 
-pub fn main() !void {
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
 
     var stdout_buffer: [4096]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
 
-    var args = try std.process.argsWithAllocator(allocator);
-    defer args.deinit();
-    _ = args.next();
+    var args = std.process.Args.Iterator.init(init.minimal.args);
+    _ = args.skip(); // skip program name
 
     const cmd = args.next() orelse {
         try stdout.writeAll("Usage: zmd <command>\n");
@@ -360,7 +346,7 @@ pub fn main() !void {
         var db_path_buf: [256]u8 = undefined;
         const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}", .{DB_PATH});
 
-        std.fs.cwd().makeDir(".qmd") catch |err| {
+        std.Io.Dir.cwd().createDir(io, ".qmd", .default_dir) catch |err| {
             if (err != error.PathAlreadyExists) return err;
         };
 
@@ -390,7 +376,7 @@ pub fn main() !void {
 
         // Hoist embedding engine creation outside the document loop (A3/A4).
         // This avoids per-document env var reads, file existence checks, and allocations.
-        var embedding_engine: ?qmd.llm.LlamaEmbedding = make_embedding_engine(allocator);
+        var embedding_engine: ?qmd.llm.LlamaEmbedding = make_embedding_engine(allocator, io, init.environ_map);
         defer if (embedding_engine) |*e| e.deinit();
         const use_real_engine = embedding_engine != null;
 
@@ -416,7 +402,7 @@ pub fn main() !void {
             if (qmd.remote.isRemoteUrl(col.path)) {
                 try stdout.print("Syncing remote collection '{s}' from {s}...\n", .{ col.name, col.path });
                 try stdout.flush();
-                resolved_path_owned = qmd.remote.syncRemote(allocator, col.path) catch |err| {
+                resolved_path_owned = qmd.remote.syncRemote(allocator, io, col.path) catch |err| {
                     try stdout.print("  Warning: Failed to sync remote {s}: {any}\n", .{ col.path, err });
                     continue;
                 };
@@ -427,11 +413,11 @@ pub fn main() !void {
             try stdout.print("Indexing collection '{s}' from {s}...\n", .{ col.name, resolved_path });
             try stdout.flush();
 
-            var dir = std.fs.cwd().openDir(resolved_path, .{ .iterate = true }) catch {
+            var dir = std.Io.Dir.cwd().openDir(io, resolved_path, .{ .iterate = true }) catch {
                 try stdout.print("  Warning: Could not open directory {s}\n", .{resolved_path});
                 continue;
             };
-            defer dir.close();
+            defer dir.close(io);
 
             var walker = dir.walk(allocator) catch {
                 try stdout.writeAll("  Error: Failed to walk directory\n");
@@ -442,12 +428,12 @@ pub fn main() !void {
             var col_count: usize = 0;
             var col_new: usize = 0;
 
-            while (try walker.next()) |entry| {
+            while (try walker.next(io)) |entry| {
                 if (entry.kind == .file and std.mem.endsWith(u8, entry.path, ".md")) {
                     var full_path_buf: [1024]u8 = undefined;
                     const full_path = std.fmt.bufPrint(&full_path_buf, "{s}/{s}", .{ resolved_path, entry.path }) catch continue;
 
-                    const content = std.fs.cwd().readFileAlloc(allocator, full_path, 1024 * 1024) catch |err| {
+                    const content = std.Io.Dir.cwd().readFileAlloc(io, full_path, allocator, @enumFromInt(1024 * 1024)) catch |err| {
                         try stdout.print("    Error reading {s}: {any}\n", .{ entry.path, err });
                         continue;
                     };
@@ -585,7 +571,7 @@ pub fn main() !void {
         };
         defer db_.close();
 
-        var result = qmd.search.hybridSearch(&db_, allocator, query_text, null, .{
+        var result = qmd.search.hybridSearch(&db_, allocator, io, query_text, null, .{
             .enable_vector = true,
             .enable_query_expansion = enable_expand,
             .enable_rerank = enable_rerank,
@@ -688,7 +674,7 @@ pub fn main() !void {
         };
         defer db_.close();
 
-        var result = qmd.search.hybridSearch(&db_, allocator, query_text, null, .{
+        var result = qmd.search.hybridSearch(&db_, allocator, io, query_text, null, .{
             .enable_vector = true,
             .max_results = 5,
         }) catch {
@@ -1203,7 +1189,7 @@ pub fn main() !void {
     if (std.mem.eql(u8, cmd, "mcp")) {
         try stdout.writeAll("Starting MCP server...\n");
         try stdout.flush();
-        try qmd.mcp.McpServer.run(allocator);
+        try qmd.mcp.McpServer.run(allocator, io);
         return;
     }
 
