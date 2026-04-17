@@ -144,8 +144,9 @@ Query text
 - Native llama.cpp FFI via `-Dllama` build flag
 - `NativeLlama` struct: embed, generate, chat with Gemma 4 E2B template
 - Pluggable `EmbedFn`/`ExpandQueryFn` function pointers in search pipeline
-- CLI wired: `update`, `vsearch`, `query`, `context`, `embed` use native when `QMD_MODEL` set
-- Falls back to subprocess/FNV when `-Dllama` not enabled or `QMD_MODEL` not set
+- Dual-model architecture: `QMD_EMBED_MODEL` for embedding, `QMD_MODEL` for generation/query expansion/chat
+- CLI wired: `update`, `vsearch`, `query`, `context`, `embed` use dedicated embed model; `query` uses generation model for expansion
+- Falls back to subprocess/FNV when `-Dllama` not enabled or no model env vars set
 
 **Phase 3 — Hybrid Pipeline + Reranking:** Partially complete.
 - RRF fusion working, LLM reranking via embedding similarity working

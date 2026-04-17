@@ -31,19 +31,26 @@ zmd context "jujutsu"
 ## Native LLM integration
 
 When built with `-Dllama`, zmd links llama.cpp statically for on-device embedding
-and generation. Set the `QMD_MODEL` environment variable to a GGUF model path:
+and generation. The dual-model architecture uses separate models for embedding and
+generation:
 
 ```sh
-export QMD_MODEL=~/models/nomic-embed-text-v1.5.Q8_0.gguf
+# Dedicated embedding model (recommended)
+export QMD_EMBED_MODEL=~/models/nomic-embed-text-v1.5.Q8_0.gguf
+
+# Generation model for query expansion, reranking, and chat
+export QMD_MODEL=~/models/gemma-4-E2B-it-Q8_0.gguf
 
 # Embedding uses native FFI instead of subprocess
 zmd update
 zmd vsearch "semantic search query"
 zmd embed "test embedding"
+zmd query "hybrid search with query expansion"
 ```
 
-Without `-Dllama` or without `QMD_MODEL`, zmd falls back to subprocess-based
-embedding (`QMD_LLAMA_EMBED_BIN` + `QMD_LLAMA_MODEL`) or FNV hash fallback.
+If `QMD_EMBED_MODEL` is not set, it falls back to `QMD_MODEL`. Without `-Dllama`
+or without any model env var, zmd falls back to subprocess-based embedding
+(`QMD_LLAMA_EMBED_BIN` + `QMD_LLAMA_MODEL`) or FNV hash fallback.
 
 ## Remote collections
 

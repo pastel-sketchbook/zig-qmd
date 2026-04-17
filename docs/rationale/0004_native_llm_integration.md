@@ -57,12 +57,16 @@ src/main.zig  ────────────────→  g_native_llam
    set before each command's search call and cleared after. Single-threaded
    CLI execution makes this safe.
 
-4. **Separate embedding and generation models.**
+4. **Dual-model architecture for embedding and generation.**
    Gemma 4 E2B is a generative model, not an embedding model. The
-   architecture supports loading different GGUF files for different tasks
-   (e.g., nomic-embed-text for vectors, Gemma 4 for query expansion/chat).
-   Currently `QMD_MODEL` points to one model; multi-model support is a
-   future enhancement.
+   architecture loads separate GGUF files via two env vars:
+   - `QMD_EMBED_MODEL` — dedicated embedding model (e.g., nomic-embed-text)
+   - `QMD_MODEL` — generation model for query expansion/chat (e.g., Gemma 4 E2B)
+   
+   `QMD_EMBED_MODEL` falls back to `QMD_MODEL` if not set. The CLI uses
+   `g_embed_llama` for all embedding operations and `g_native_llama` for
+   generation. Zig function pointers can't capture state, so module-level
+   globals bridge the gap.
 
 5. **Static library linking, not dynamic.**
    All llama.cpp libraries (`libllama.a`, `libggml.a`, `libggml-base.a`,
