@@ -50,8 +50,22 @@ pub const NativeLlama = struct {
         return c.llama_model_n_embd(self.model);
     }
 
+    /// Returns true if the loaded model natively supports embedding (pooling_type != -1).
+    /// Generative-only models (e.g., Gemma 4 E2B) return false.
+    pub fn supportsEmbedding(self: *const NativeLlama) bool {
+        // Create a temporary context to check default pooling type
+        var cparams = c.llama_context_default_params();
+        cparams.embeddings = true;
+        cparams.pooling_type = c.LLAMA_POOLING_TYPE_UNSPECIFIED;
+        const ctx = c.llama_init_from_model(self.model, cparams) orelse return false;
+        defer c.llama_free(ctx);
+        const pool = c.llama_pooling_type(ctx);
+        return pool != c.LLAMA_POOLING_TYPE_UNSPECIFIED and pool != c.LLAMA_POOLING_TYPE_NONE;
+    }
+
     /// Generates an embedding vector for the given text.
     /// The caller owns the returned slice.
+    /// Returns EmbeddingFailed if the model does not support embedding.
     pub fn embed(self: *NativeLlama, text: []const u8) NativeLlamaError![]f32 {
         // Create context with embedding mode
         var cparams = c.llama_context_default_params();
@@ -153,22 +167,21 @@ pub const NativeLlama = struct {
             return NativeLlamaError.SamplerFailed);
 
         // Generate tokens
-        var output = std.ArrayList(u8).init(self.allocator);
-        defer output.deinit();
-        errdefer output.deinit();
+        var output: std.ArrayList(u8) = .empty;
+        defer output.deinit(self.allocator);
 
         const eos = c.llama_vocab_eos(vocab);
         var n_decoded: i32 = n_prompt;
         var buf: [256]u8 = undefined;
 
         for (0..max_tokens) |_| {
-            const new_token = c.llama_sampler_sample(sampler, ctx, -1);
+            var new_token = c.llama_sampler_sample(sampler, ctx, -1);
             if (new_token == eos) break;
 
             // Detokenize
             const n = c.llama_token_to_piece(vocab, new_token, &buf, @intCast(buf.len), 0, true);
             if (n > 0) {
-                output.appendSlice(buf[0..@intCast(n)]) catch
+                output.appendSlice(self.allocator, buf[0..@intCast(n)]) catch
                     return NativeLlamaError.OutOfMemory;
             }
 
@@ -179,7 +192,7 @@ pub const NativeLlama = struct {
             n_decoded += 1;
         }
 
-        return output.toOwnedSlice() catch return NativeLlamaError.OutOfMemory;
+        return output.toOwnedSlice(self.allocator) catch return NativeLlamaError.OutOfMemory;
     }
 
     /// Generates text using Gemma 4 chat template format.
@@ -192,29 +205,28 @@ pub const NativeLlama = struct {
         enable_thinking: bool,
     ) NativeLlamaError![]u8 {
         // Build Gemma 4 formatted prompt
-        var prompt_buf = std.ArrayList(u8).init(self.allocator);
-        defer prompt_buf.deinit();
-        errdefer prompt_buf.deinit();
+        var prompt_buf: std.ArrayList(u8) = .empty;
+        defer prompt_buf.deinit(self.allocator);
 
         // System turn
         if (system_prompt) |sys| {
-            prompt_buf.appendSlice("<start_of_turn>system\n") catch return NativeLlamaError.OutOfMemory;
+            prompt_buf.appendSlice(self.allocator, "<start_of_turn>system\n") catch return NativeLlamaError.OutOfMemory;
             if (enable_thinking) {
-                prompt_buf.appendSlice("<|think|>\n") catch return NativeLlamaError.OutOfMemory;
+                prompt_buf.appendSlice(self.allocator, "<|think|>\n") catch return NativeLlamaError.OutOfMemory;
             }
-            prompt_buf.appendSlice(sys) catch return NativeLlamaError.OutOfMemory;
-            prompt_buf.appendSlice("<end_of_turn>\n") catch return NativeLlamaError.OutOfMemory;
+            prompt_buf.appendSlice(self.allocator, sys) catch return NativeLlamaError.OutOfMemory;
+            prompt_buf.appendSlice(self.allocator, "<end_of_turn>\n") catch return NativeLlamaError.OutOfMemory;
         } else if (enable_thinking) {
-            prompt_buf.appendSlice("<start_of_turn>system\n<|think|>\n<end_of_turn>\n") catch return NativeLlamaError.OutOfMemory;
+            prompt_buf.appendSlice(self.allocator, "<start_of_turn>system\n<|think|>\n<end_of_turn>\n") catch return NativeLlamaError.OutOfMemory;
         }
 
         // User turn
-        prompt_buf.appendSlice("<start_of_turn>user\n") catch return NativeLlamaError.OutOfMemory;
-        prompt_buf.appendSlice(user_message) catch return NativeLlamaError.OutOfMemory;
-        prompt_buf.appendSlice("<end_of_turn>\n") catch return NativeLlamaError.OutOfMemory;
+        prompt_buf.appendSlice(self.allocator, "<start_of_turn>user\n") catch return NativeLlamaError.OutOfMemory;
+        prompt_buf.appendSlice(self.allocator, user_message) catch return NativeLlamaError.OutOfMemory;
+        prompt_buf.appendSlice(self.allocator, "<end_of_turn>\n") catch return NativeLlamaError.OutOfMemory;
 
         // Model turn prompt
-        prompt_buf.appendSlice("<start_of_turn>model\n") catch return NativeLlamaError.OutOfMemory;
+        prompt_buf.appendSlice(self.allocator, "<start_of_turn>model\n") catch return NativeLlamaError.OutOfMemory;
 
         const full_prompt = prompt_buf.items;
         return self.generate(full_prompt, max_tokens);
@@ -229,24 +241,24 @@ pub fn formatGemma4Prompt(
     user_message: []const u8,
     enable_thinking: bool,
 ) ![]u8 {
-    var buf = std.ArrayList(u8).init(allocator);
-    errdefer buf.deinit();
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
 
     if (system_prompt) |sys| {
-        try buf.appendSlice("<start_of_turn>system\n");
-        if (enable_thinking) try buf.appendSlice("<|think|>\n");
-        try buf.appendSlice(sys);
-        try buf.appendSlice("<end_of_turn>\n");
+        try buf.appendSlice(allocator, "<start_of_turn>system\n");
+        if (enable_thinking) try buf.appendSlice(allocator, "<|think|>\n");
+        try buf.appendSlice(allocator, sys);
+        try buf.appendSlice(allocator, "<end_of_turn>\n");
     } else if (enable_thinking) {
-        try buf.appendSlice("<start_of_turn>system\n<|think|>\n<end_of_turn>\n");
+        try buf.appendSlice(allocator, "<start_of_turn>system\n<|think|>\n<end_of_turn>\n");
     }
 
-    try buf.appendSlice("<start_of_turn>user\n");
-    try buf.appendSlice(user_message);
-    try buf.appendSlice("<end_of_turn>\n");
-    try buf.appendSlice("<start_of_turn>model\n");
+    try buf.appendSlice(allocator, "<start_of_turn>user\n");
+    try buf.appendSlice(allocator, user_message);
+    try buf.appendSlice(allocator, "<end_of_turn>\n");
+    try buf.appendSlice(allocator, "<start_of_turn>model\n");
 
-    return buf.toOwnedSlice();
+    return buf.toOwnedSlice(allocator);
 }
 
 // =============================================================================

@@ -44,9 +44,13 @@ fn nativeExpandQueryFn(allocator: std.mem.Allocator, query: []const u8) anyerror
     return error.NativeLlamaNotAvailable;
 }
 
-/// Returns EmbedFn pointer if native llama is initialized, null otherwise.
+/// Returns EmbedFn pointer if native llama is initialized and supports embedding, null otherwise.
 fn getNativeEmbedFn() ?qmd.search.EmbedFn {
-    if (g_native_llama != null) return &nativeEmbedFn;
+    if (build_options.enable_llama) {
+        if (g_native_llama) |nl| {
+            if (nl.supportsEmbedding()) return &nativeEmbedFn;
+        }
+    }
     return null;
 }
 
@@ -558,7 +562,7 @@ pub fn main(init: std.process.Init) !void {
                         try chunk_slices.appendSlice(allocator, chunks.chunks.items);
                     }
 
-                    if (g_native_llama != null) {
+                    if (build_options.enable_llama and g_native_llama != null and getNativeEmbedFn() != null) {
                         for (chunk_slices.items, 0..) |chunk, idx| {
                             const formatted = qmd.llm.formatDocForEmbedding(allocator, chunk) catch continue;
                             defer allocator.free(formatted);
@@ -1397,17 +1401,22 @@ pub fn main(init: std.process.Init) !void {
         defer if (native_llama_e) |*nl| nl.deinit();
 
         if (native_llama_e) |*nl| {
-            const emb = nl.embed(text) catch {
-                try stdout.writeAll("Native embed failed\n");
+            if (build_options.enable_llama and nl.supportsEmbedding()) {
+                const emb = nl.embed(text) catch {
+                    try stdout.writeAll("Native embed failed\n");
+                    return;
+                };
+                defer std.heap.page_allocator.free(emb);
+                try stdout.print("Embedding ({d} dims, native): [{d:.4}", .{ emb.len, emb[0] });
+                if (emb.len > 1) try stdout.print(", {d:.4}", .{emb[1]});
+                if (emb.len > 2) try stdout.print(", {d:.4}...", .{emb[2]});
+                try stdout.writeAll("]\n");
+                try stdout.flush();
                 return;
-            };
-            defer std.heap.page_allocator.free(emb);
-            try stdout.print("Embedding ({d} dims, native): [{d:.4}", .{ emb.len, emb[0] });
-            if (emb.len > 1) try stdout.print(", {d:.4}", .{emb[1]});
-            if (emb.len > 2) try stdout.print(", {d:.4}...", .{emb[2]});
-            try stdout.writeAll("]\n");
-            try stdout.flush();
-            return;
+            } else {
+                try stdout.writeAll("Model does not support embedding, using fallback\n");
+                try stdout.flush();
+            }
         }
 
         var llm_fallback = qmd.llm.LlamaCpp.init("/fake", allocator) catch {
