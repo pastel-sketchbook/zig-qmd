@@ -101,9 +101,10 @@ pub const NativeLlama = struct {
         const encode_result = c.llama_encode(ctx, batch);
         if (encode_result != 0) return NativeLlamaError.EncodeFailed;
 
-        // Extract pooled embedding
+        // Extract pooled embedding (use seq-level for pooled models)
         const n_embd = c.llama_model_n_embd(self.model);
-        const emb_ptr = c.llama_get_embeddings(ctx);
+        const emb_ptr = c.llama_get_embeddings_seq(ctx, 0) orelse
+            c.llama_get_embeddings(ctx);
         if (emb_ptr == null) return NativeLlamaError.EmbeddingFailed;
 
         // Copy to owned slice

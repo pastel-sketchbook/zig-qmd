@@ -30,10 +30,17 @@ const NativeLlamaType = if (build_options.enable_llama) qmd.llm_native.NativeLla
 };
 
 /// EmbedFn-compatible wrapper that delegates to the embed llama instance.
-fn nativeEmbedFn(_: std.mem.Allocator, text: []const u8, _: bool) anyerror![]f32 {
+/// NativeLlama uses page_allocator internally, so we copy the result into
+/// the caller's allocator and free the original.
+fn nativeEmbedFn(allocator: std.mem.Allocator, text: []const u8, _: bool) anyerror![]f32 {
     if (build_options.enable_llama) {
         const llama = g_embed_llama orelse return error.NativeLlamaNotInitialized;
-        return llama.embed(text) catch |e| return @as(anyerror, e);
+        const native_result = llama.embed(text) catch |e| return @as(anyerror, e);
+        // Copy from page_allocator to caller's allocator
+        const result = allocator.alloc(f32, native_result.len) catch return error.OutOfMemory;
+        @memcpy(result, native_result);
+        std.heap.page_allocator.free(native_result);
+        return result;
     }
     return error.NativeLlamaNotAvailable;
 }
