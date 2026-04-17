@@ -16,46 +16,47 @@ pub const version = "0.3.0";
 /// High-level QMD engine providing collection management, indexing, and search.
 pub const Qmd = struct {
     allocator: std.mem.Allocator,
-    db: db.Db,
+    io: std.Io,
+    db_inst: db.Db,
 
-    pub fn open(allocator: std.mem.Allocator, db_path: [*:0]const u8) !Qmd {
+    pub fn open(allocator: std.mem.Allocator, io: std.Io, db_path: [*:0]const u8) !Qmd {
         var conn = try db.Db.open(db_path);
         try db.initSchema(&conn);
-        return .{ .allocator = allocator, .db = conn };
+        return .{ .allocator = allocator, .io = io, .db_inst = conn };
     }
 
     /// Closes the underlying database connection.
     pub fn close(self: *Qmd) void {
-        self.db.close();
+        self.db_inst.close();
     }
 
     /// Registers a new collection by name and filesystem path.
     pub fn add_collection(self: *Qmd, name: []const u8, path: []const u8) !void {
-        try config.addCollection(&self.db, name, path);
+        try config.addCollection(&self.db_inst, name, path);
     }
 
     /// Scans all collection directories, indexes markdown files, and generates embeddings.
     pub fn update(self: *Qmd) !usize {
-        var collections_result = try config.listCollections(&self.db, self.allocator);
+        var collections_result = try config.listCollections(&self.db_inst, self.allocator);
         defer config.freeCollections(&collections_result);
 
         var total_indexed: usize = 0;
         for (collections_result.collections.items) |col| {
-            var dir = std.fs.cwd().openDir(col.path, .{ .iterate = true }) catch continue;
-            defer dir.close();
+            var dir = std.Io.Dir.cwd().openDir(self.io, col.path, .{ .iterate = true }) catch continue;
+            defer dir.close(self.io);
 
             var walker = dir.walk(self.allocator) catch continue;
             defer walker.deinit();
 
-            while (try walker.next()) |entry| {
+            while (try walker.next(self.io)) |entry| {
                 if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".md")) continue;
 
                 var full_path_buf: [1024]u8 = undefined;
                 const full_path = std.fmt.bufPrint(&full_path_buf, "{s}/{s}", .{ col.path, entry.path }) catch continue;
-                const content = std.fs.cwd().readFileAlloc(self.allocator, full_path, 1024 * 1024) catch continue;
+                const content = std.Io.Dir.cwd().readFileAlloc(self.io, full_path, self.allocator, @enumFromInt(1024 * 1024)) catch continue;
                 defer self.allocator.free(content);
 
-                const insert_result = store.insertDocument(&self.db, col.name, entry.path, content) catch continue;
+                const insert_result = store.insertDocument(&self.db_inst, col.name, entry.path, content) catch continue;
                 total_indexed += 1;
 
                 // Skip chunking and embedding when content is unchanged
@@ -90,7 +91,7 @@ pub const Qmd = struct {
                     defer self.allocator.free(formatted);
                     const emb = fallback.embed(formatted, self.allocator) catch continue;
                     defer self.allocator.free(emb);
-                    store.upsertContentVectorAt(&self.db, doc_hash[0..], @intCast(idx), 0, "fallback-fnv", emb, self.allocator) catch |err| {
+                    store.upsertContentVectorAt(&self.db_inst, doc_hash[0..], @intCast(idx), 0, "fallback-fnv", emb, self.allocator) catch |err| {
                         if (err == error.OutOfMemory) return err;
                         continue;
                     };
@@ -102,17 +103,17 @@ pub const Qmd = struct {
 
     /// Performs a BM25 full-text search, optionally filtered by collection.
     pub fn search_fts(self: *Qmd, query_text: []const u8, collection: ?[]const u8) !search.SearchResults {
-        return search.searchFTS(&self.db, self.allocator, query_text, collection);
+        return search.searchFTS(&self.db_inst, self.allocator, query_text, collection);
     }
 
     /// Performs a hybrid search combining FTS and vector results with RRF fusion.
     pub fn query_hybrid(self: *Qmd, query_text: []const u8, options: search.HybridOptions) !search.HybridResult {
-        return search.hybridSearch(&self.db, self.allocator, query_text, null, options);
+        return search.hybridSearch(&self.db_inst, self.allocator, self.io, query_text, null, options);
     }
 
     /// Retrieves a document by collection and path.
     pub fn get(self: *Qmd, collection: []const u8, path: []const u8) !store.ActiveDocument {
-        return store.findActiveDocument(&self.db, collection, path, self.allocator);
+        return store.findActiveDocument(&self.db_inst, collection, path, self.allocator);
     }
 };
 
@@ -151,15 +152,15 @@ test "ZMD open init add update search get" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    var engine = try Qmd.open(allocator, ":memory:");
+    var engine = try Qmd.open(allocator, std.testing.io, ":memory:");
     defer engine.close();
 
-    try config.addCollection(&engine.db, "notes", "/tmp");
-    var cols = try config.listCollections(&engine.db, allocator);
+    try config.addCollection(&engine.db_inst, "notes", "/tmp");
+    var cols = try config.listCollections(&engine.db_inst, allocator);
     defer config.freeCollections(&cols);
     try std.testing.expect(cols.collections.items.len >= 1);
 
-    _ = try store.insertDocument(&engine.db, "notes", "a.md", "# A\n\nhello auth");
+    _ = try store.insertDocument(&engine.db_inst, "notes", "a.md", "# A\n\nhello auth");
     var res = try engine.search_fts("auth", null);
     defer res.deinit(allocator);
     try std.testing.expect(res.results.items.len >= 1);

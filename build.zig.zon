@@ -2,7 +2,7 @@
     .name = .zig_qmd,
     .version = "0.3.2",
     .fingerprint = 0x8d4c08ec3e8c34ad,
-    .minimum_zig_version = "0.15.0",
+    .minimum_zig_version = "0.16.0",
     .paths = .{
         "build.zig",
         "build.zig.zon",
