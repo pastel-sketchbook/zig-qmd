@@ -14,6 +14,9 @@
 # Build
 zig build          # or: task build
 
+# Build with native llama.cpp (requires pre-built static libs in deps/llama.cpp/build-static/)
+zig build -Dllama
+
 # Add a local collection and index it
 zmd collection add notes ~/Documents/notes
 zmd update
@@ -24,6 +27,23 @@ zmd vsearch "how does login work"
 zmd query "quarterly planning decisions"
 zmd context "jujutsu"
 ```
+
+## Native LLM integration
+
+When built with `-Dllama`, zmd links llama.cpp statically for on-device embedding
+and generation. Set the `QMD_MODEL` environment variable to a GGUF model path:
+
+```sh
+export QMD_MODEL=~/models/nomic-embed-text-v1.5.Q8_0.gguf
+
+# Embedding uses native FFI instead of subprocess
+zmd update
+zmd vsearch "semantic search query"
+zmd embed "test embedding"
+```
+
+Without `-Dllama` or without `QMD_MODEL`, zmd falls back to subprocess-based
+embedding (`QMD_LLAMA_EMBED_BIN` + `QMD_LLAMA_MODEL`) or FNV hash fallback.
 
 ## Remote collections
 

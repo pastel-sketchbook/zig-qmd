@@ -12,10 +12,22 @@ tasks:
     cmds:
       - zig build
 
+  build:llama:
+    desc: Build with native llama.cpp FFI (requires pre-built static libs)
+    deps:
+      - fmt
+    cmds:
+      - zig build -Dllama
+
   test:
     desc: Run all tests
     cmds:
       - zig build test
+
+  test:llama:
+    desc: Run all tests with native llama.cpp enabled
+    cmds:
+      - zig build test -Dllama
 
   test:mcp:
     desc: Run MCP-related tests (unit + protocol)

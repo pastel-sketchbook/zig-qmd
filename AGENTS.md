@@ -72,7 +72,9 @@ zig-qmd/
 │   ├── store.zig       # Document storage (CRUD, hash, upsert)
 │   ├── chunker.zig     # Smart document chunking (break-points, code fences)
 │   ├── search.zig      # Search pipelines (FTS, vec, hybrid, RRF fusion)
-│   ├── llm.zig         # llama.cpp FFI (embed, generate, rerank)
+│   ├── llm.zig         # Subprocess-based llama.cpp (embed, generate, rerank)
+│   ├── llm_native.zig  # Native llama.cpp FFI via -Dllama (embed, generate, chat)
+│   ├── c_llama.h       # translate-C header for llama.cpp API
 │   ├── config.zig      # YAML config + collection management
 │   ├── ast.zig          # Tree-sitter AST chunking (Phase 4)
 │   └── mcp.zig         # MCP protocol server (Phase 4)
@@ -95,7 +97,7 @@ zig-qmd/
 |---|---|---|
 | `db.ts` | `src/db.zig` | SQLite C API via `@cImport`. Compiles `sqlite3.c` + `sqlite-vec.c`. |
 | `store.ts` | `src/store.zig` + `src/chunker.zig` + `src/search.zig` | Split the 2800-line monolith. |
-| `llm.ts` | `src/llm.zig` | Direct C FFI to `llama.cpp`. Context pools managed with `defer`/`errdefer`. |
+| `llm.ts` | `src/llm.zig` + `src/llm_native.zig` | `llm.zig`: subprocess fallback. `llm_native.zig`: native C FFI via `-Dllama`. |
 | `collections.ts` | `src/config.zig` | YAML parsing (simple custom parser for QMD's flat schema). |
 | `ast.ts` | `src/ast.zig` | Tree-sitter C API + compiled grammar `.c` files. |
 | `cli/*.ts` | `src/main.zig` | Zig `std.process.args` + arg parsing. |
@@ -127,11 +129,31 @@ Query text
 
 ## Implementation Status
 
-**Phase 0 — Scaffold (current):**
-- Build system with native CLI target
-- Minimal CLI with version output
-- Library stub with version constant and placeholder
-- Tests for the placeholder
+**Phase 0 — Scaffold:** Complete.
+
+**Phase 1 — Core Data Layer:** Complete.
+- SQLite + FTS5 + sqlite-vec compiled as static libs
+- Document storage, chunking, FTS search, config, CLI commands all working
+
+**Phase 2 — Vector Search + Embeddings:** Complete.
+- Subprocess-based embedding via `llama-embedding` binary
+- FNV hash fallback for environments without llama.cpp
+- Vector search (`vsearch`) and hybrid search (`query`) working
+
+**Phase 2b — Native LLM Integration (current):**
+- Native llama.cpp FFI via `-Dllama` build flag
+- `NativeLlama` struct: embed, generate, chat with Gemma 4 E2B template
+- Pluggable `EmbedFn`/`ExpandQueryFn` function pointers in search pipeline
+- CLI wired: `update`, `vsearch`, `query`, `context`, `embed` use native when `QMD_MODEL` set
+- Falls back to subprocess/FNV when `-Dllama` not enabled or `QMD_MODEL` not set
+
+**Phase 3 — Hybrid Pipeline + Reranking:** Partially complete.
+- RRF fusion working, LLM reranking via embedding similarity working
+- Query expansion wired with native `ExpandQueryFn` support
+
+**Phase 4 — AST Chunking + MCP + Polish:** In progress.
+- Tree-sitter AST chunking working
+- MCP server stub exists
 
 ## What to do next
 
@@ -139,6 +161,7 @@ Priority order (see PORT_PLAN.md for full details):
 
 ### Phase 1 — Core Data Layer (FTS-only search)
 **Goal:** A working `qmd search` and `qmd get` with BM25.
+**Status:** Complete.
 
 1. Set up `build.zig` with SQLite amalgamation + sqlite-vec compilation.
 2. Port `db.zig`: open, pragma WAL, FTS5 table creation, triggers.
@@ -151,12 +174,15 @@ Priority order (see PORT_PLAN.md for full details):
 
 ### Phase 2 — Vector Search + Embeddings
 **Goal:** `qmd vsearch` and `qmd embed` working with llama.cpp.
+**Status:** Complete (subprocess + native FFI).
 
 ### Phase 3 — Hybrid Pipeline + Reranking
 **Goal:** Full `qmd query` with RRF fusion, query expansion, and LLM reranking.
+**Status:** Partially complete. RRF fusion and reranking work. Query expansion wired.
 
 ### Phase 4 — AST Chunking + MCP + Polish
 **Goal:** Feature parity with TypeScript QMD.
+**Status:** In progress. Tree-sitter AST chunking works. MCP stub exists.
 
 ## Zig-Specific Design Decisions
 
