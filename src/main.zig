@@ -190,6 +190,7 @@ fn make_embedding_engine(allocator: std.mem.Allocator, io: std.Io, environ: *std
     return qmd.llm.LlamaEmbedding.init(allocator, io, bin_path, model_path) catch null;
 }
 
+/// CLI entry point for the zmd command-line tool.
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
@@ -908,6 +909,10 @@ pub fn main(init: std.process.Init) !void {
             try stdout.flush();
             return;
         };
+        defer {
+            qmd.search.freeScoredResultSlice(result.results, allocator);
+            allocator.free(result.results);
+        }
 
         sortScoredResults(result.results, sort_order);
 

@@ -19,6 +19,7 @@ pub const Qmd = struct {
     io: std.Io,
     db_inst: db.Db,
 
+    /// Opens a QMD database at the given path, initializing the schema if needed.
     pub fn open(allocator: std.mem.Allocator, io: std.Io, db_path: [*:0]const u8) !Qmd {
         var conn = try db.Db.open(db_path);
         try db.initSchema(&conn);

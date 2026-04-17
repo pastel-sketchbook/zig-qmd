@@ -115,6 +115,7 @@ pub fn searchFTS(
 pub const SearchResults = struct {
     results: std.ArrayList(SearchResult),
 
+    /// Frees all owned strings in the search results and the backing list.
     pub fn deinit(self: *SearchResults, allocator: std.mem.Allocator) void {
         freeSearchResultSlice(self.results.items, allocator);
         self.results.deinit(allocator);
@@ -206,7 +207,8 @@ fn freeSearchResultSlice(items: []SearchResult, allocator: std.mem.Allocator) vo
     }
 }
 
-fn freeScoredResultSlice(items: []ScoredResult, allocator: std.mem.Allocator) void {
+/// Frees all owned strings in a slice of scored results.
+pub fn freeScoredResultSlice(items: []ScoredResult, allocator: std.mem.Allocator) void {
     for (items) |r| {
         allocator.free(r.collection);
         allocator.free(r.path);
@@ -472,6 +474,7 @@ pub const HybridResult = struct {
     fts_count: usize,
     vec_count: usize,
 
+    /// Frees all owned strings in the hybrid results and the backing list.
     pub fn deinit(self: *HybridResult, allocator: std.mem.Allocator) void {
         freeSearchResultSlice(self.results.items, allocator);
         self.results.deinit(allocator);

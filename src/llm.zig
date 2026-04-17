@@ -123,12 +123,17 @@ pub const LlamaChatSession = struct {
 
     /// Creates a new chat session with paths to binary and model.
     pub fn init(allocator: std.mem.Allocator, io: Io, binary_path: []const u8, model_path: []const u8) !LlamaChatSession {
+        const bp = try allocator.dupe(u8, binary_path);
+        errdefer allocator.free(bp);
+        const mp = try allocator.dupe(u8, model_path);
+        errdefer allocator.free(mp);
+        const hist = try std.ArrayList(ChatMessage).initCapacity(allocator, 8);
         return .{
             .allocator = allocator,
             .io = io,
-            .binary_path = try allocator.dupe(u8, binary_path),
-            .model_path = try allocator.dupe(u8, model_path),
-            .history = try std.ArrayList(ChatMessage).initCapacity(allocator, 8),
+            .binary_path = bp,
+            .model_path = mp,
+            .history = hist,
         };
     }
 
@@ -423,6 +428,7 @@ pub const LlmCache = struct {
     /// Stores a result in the cache.
     pub fn put(self: *LlmCache, key: []const u8, value: CachedResult) !void {
         const key_copy = try self.allocator.dupe(u8, key);
+        errdefer self.allocator.free(key_copy);
         try self.entries.put(key_copy, value);
     }
 

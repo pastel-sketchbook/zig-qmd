@@ -115,14 +115,26 @@ pub fn getCollectionByName(db_: *db.Db, name: []const u8, allocator: std.mem.All
     const update_command = if (upd_cmd) |b| std.mem.sliceTo(b, 0) else null;
     const context = if (context_b) |b| std.mem.sliceTo(b, 0) else null;
 
+    const name_owned = try allocator.dupe(u8, name_s);
+    errdefer allocator.free(name_owned);
+    const path_owned = try allocator.dupe(u8, path_s);
+    errdefer allocator.free(path_owned);
+    const pattern_owned = try allocator.dupe(u8, pattern_s);
+    errdefer allocator.free(pattern_owned);
+    const ignore_owned = if (ignore_patterns) |s| try allocator.dupe(u8, s) else null;
+    errdefer if (ignore_owned) |o| allocator.free(o);
+    const update_owned = if (update_command) |s| try allocator.dupe(u8, s) else null;
+    errdefer if (update_owned) |o| allocator.free(o);
+    const context_owned = if (context) |s| try allocator.dupe(u8, s) else null;
+
     return .{
-        .name = try allocator.dupe(u8, name_s),
-        .path = try allocator.dupe(u8, path_s),
-        .pattern = try allocator.dupe(u8, pattern_s),
-        .ignore_patterns = if (ignore_patterns) |s| try allocator.dupe(u8, s) else null,
+        .name = name_owned,
+        .path = path_owned,
+        .pattern = pattern_owned,
+        .ignore_patterns = ignore_owned,
         .include_by_default = inc_def == 1,
-        .update_command = if (update_command) |s| try allocator.dupe(u8, s) else null,
-        .context = if (context) |s| try allocator.dupe(u8, s) else null,
+        .update_command = update_owned,
+        .context = context_owned,
     };
 }
 

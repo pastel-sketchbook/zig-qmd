@@ -164,7 +164,9 @@ pub fn findActiveDocument(db_: *db.Db, collection: []const u8, path: []const u8,
     const d = stmt.columnText(3);
 
     const title_copy = if (ttl) |t| try allocator.dupe(u8, std.mem.span(t)) else try allocator.dupe(u8, "");
+    errdefer allocator.free(title_copy);
     const hash_copy = if (hsh) |h| try allocator.dupe(u8, std.mem.span(h)) else try allocator.dupe(u8, "");
+    errdefer allocator.free(hash_copy);
     const doc_copy = if (d) |doc_txt| try allocator.dupe(u8, std.mem.span(doc_txt)) else try allocator.dupe(u8, "");
 
     return .{
