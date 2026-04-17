@@ -15,7 +15,12 @@ const DEFAULT_LLAMA_MODEL_PATH = "";
 /// This sidesteps Zig's lack of closures for function-pointer callbacks.
 var g_native_llama: ?*NativeLlamaType = null;
 
-const NativeLlamaType = if (build_options.enable_llama) qmd.llm_native.NativeLlama else struct {};
+const NativeLlamaType = if (build_options.enable_llama) qmd.llm_native.NativeLlama else struct {
+    pub fn deinit(_: *@This()) void {}
+    pub fn embed(_: *@This(), _: []const u8) error{}![]f32 {
+        unreachable;
+    }
+};
 
 /// EmbedFn-compatible wrapper that delegates to the global NativeLlama.
 fn nativeEmbedFn(_: std.mem.Allocator, text: []const u8, _: bool) anyerror![]f32 {
@@ -1396,7 +1401,7 @@ pub fn main(init: std.process.Init) !void {
                 try stdout.writeAll("Native embed failed\n");
                 return;
             };
-            defer nl.allocator.free(emb);
+            defer std.heap.page_allocator.free(emb);
             try stdout.print("Embedding ({d} dims, native): [{d:.4}", .{ emb.len, emb[0] });
             if (emb.len > 1) try stdout.print(", {d:.4}", .{emb[1]});
             if (emb.len > 2) try stdout.print(", {d:.4}...", .{emb[2]});
