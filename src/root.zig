@@ -1,4 +1,5 @@
 const std = @import("std");
+const build_options = @import("build_options");
 
 pub const db = @import("db.zig");
 pub const store = @import("store.zig");
@@ -9,6 +10,7 @@ pub const llm = @import("llm.zig");
 pub const mcp = @import("mcp.zig");
 pub const ast = @import("ast.zig");
 pub const remote = @import("remote.zig");
+pub const llm_native = if (build_options.enable_llama) @import("llm_native.zig") else struct {};
 
 /// ZMD library version, kept in sync with the VERSION file.
 pub const version = "0.3.0";
