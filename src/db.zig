@@ -1,8 +1,5 @@
 const std = @import("std");
-const c = @cImport({
-    @cInclude("sqlite3.h");
-    @cInclude("sqlite-vec.h");
-});
+const c = @import("c_sqlite");
 
 /// Errors returned by database operations.
 pub const DbError = error{

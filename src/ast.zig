@@ -1,7 +1,5 @@
 const std = @import("std");
-const c = @cImport({
-    @cInclude("tree_sitter/api.h");
-});
+const c = @import("c_treesitter");
 
 extern fn tree_sitter_markdown() ?*const c.TSLanguage;
 

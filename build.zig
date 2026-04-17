@@ -54,10 +54,32 @@ pub fn build(b: *std.Build) void {
     treesitter.root_module.addCSourceFile(.{ .file = b.path("deps/tree-sitter-markdown/parser.c"), .flags = &.{} });
     treesitter.root_module.addCSourceFile(.{ .file = b.path("deps/tree-sitter-markdown/scanner.c"), .flags = &.{} });
 
+    // --- Translate C headers (replaces deprecated @cImport) ---
+    const translate_sqlite = b.addTranslateC(.{
+        .root_source_file = b.path("src/c_sqlite.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    translate_sqlite.addIncludePath(b.path("deps"));
+    const c_sqlite = translate_sqlite.createModule();
+
+    const translate_treesitter = b.addTranslateC(.{
+        .root_source_file = b.path("src/c_treesitter.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    translate_treesitter.addIncludePath(b.path("deps/tree-sitter"));
+    translate_treesitter.addIncludePath(b.path("deps/tree-sitter/src"));
+    const c_treesitter = translate_treesitter.createModule();
+
     // --- Library module (SDK) ---
     const mod = b.addModule("qmd", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
+        .imports = &.{
+            .{ .name = "c_sqlite", .module = c_sqlite },
+            .{ .name = "c_treesitter", .module = c_treesitter },
+        },
     });
     mod.addIncludePath(b.path("deps"));
     mod.addIncludePath(b.path("deps/tree-sitter"));
@@ -75,6 +97,8 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "qmd", .module = mod },
+                .{ .name = "c_sqlite", .module = c_sqlite },
+                .{ .name = "c_treesitter", .module = c_treesitter },
             },
         }),
     });
