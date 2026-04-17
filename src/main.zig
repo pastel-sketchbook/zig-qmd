@@ -1,9 +1,69 @@
 const std = @import("std");
 const qmd = @import("qmd");
+const build_options = @import("build_options");
 
 const DB_PATH = ".qmd/data.db";
 const DEFAULT_LLAMA_EMBED_BIN = "deps/llama.cpp/build/bin/llama-embedding";
 const DEFAULT_LLAMA_MODEL_PATH = "";
+
+// ---------------------------------------------------------------------------
+// Native llama.cpp integration (enabled via -Dllama build flag)
+// ---------------------------------------------------------------------------
+
+/// Module-level pointer to a NativeLlama instance, set during command
+/// execution and read by the EmbedFn / ExpandQueryFn wrappers below.
+/// This sidesteps Zig's lack of closures for function-pointer callbacks.
+var g_native_llama: ?*NativeLlamaType = null;
+
+const NativeLlamaType = if (build_options.enable_llama) qmd.llm_native.NativeLlama else struct {};
+
+/// EmbedFn-compatible wrapper that delegates to the global NativeLlama.
+fn nativeEmbedFn(_: std.mem.Allocator, text: []const u8, _: bool) anyerror![]f32 {
+    if (build_options.enable_llama) {
+        const llama = g_native_llama orelse return error.NativeLlamaNotInitialized;
+        return llama.embed(text) catch |e| return @as(anyerror, e);
+    }
+    return error.NativeLlamaNotAvailable;
+}
+
+/// ExpandQueryFn-compatible wrapper that delegates to the global NativeLlama.
+fn nativeExpandQueryFn(allocator: std.mem.Allocator, query: []const u8) anyerror![]const u8 {
+    if (build_options.enable_llama) {
+        const llama = g_native_llama orelse return error.NativeLlamaNotInitialized;
+        const prompt = try std.fmt.allocPrint(allocator, "Expand the following search query with related terms and synonyms. " ++
+            "Return ONLY the expanded query, no explanation.\n\nQuery: {s}\n\nExpanded query:", .{query});
+        defer allocator.free(prompt);
+        const result = llama.generate(prompt, 128) catch |e| return @as(anyerror, e);
+        return result;
+    }
+    return error.NativeLlamaNotAvailable;
+}
+
+/// Returns EmbedFn pointer if native llama is initialized, null otherwise.
+fn getNativeEmbedFn() ?qmd.search.EmbedFn {
+    if (g_native_llama != null) return &nativeEmbedFn;
+    return null;
+}
+
+/// Returns ExpandQueryFn pointer if native llama is initialized, null otherwise.
+fn getNativeExpandQueryFn() ?qmd.search.ExpandQueryFn {
+    if (g_native_llama != null) return &nativeExpandQueryFn;
+    return null;
+}
+
+/// Attempts to initialize a NativeLlama from QMD_MODEL env var.
+/// Returns a stack-allocated instance that the caller must keep alive.
+fn initNativeLlama(environ: *std.process.Environ.Map) ?NativeLlamaType {
+    if (!build_options.enable_llama) return null;
+    const model_path = environ.get("QMD_MODEL") orelse environ.get("QMD_LLAMA_MODEL") orelse return null;
+    if (model_path.len == 0) return null;
+    // Need null-terminated path for C API
+    var path_buf: [4096]u8 = undefined;
+    if (model_path.len >= path_buf.len) return null;
+    @memcpy(path_buf[0..model_path.len], model_path);
+    path_buf[model_path.len] = 0;
+    return qmd.llm_native.NativeLlama.init(std.heap.page_allocator, path_buf[0..model_path.len :0]) catch null;
+}
 
 const OutputFormat = enum {
     text,
@@ -377,9 +437,18 @@ pub fn main(init: std.process.Init) !void {
 
         // Hoist embedding engine creation outside the document loop (A3/A4).
         // This avoids per-document env var reads, file existence checks, and allocations.
-        var embedding_engine: ?qmd.llm.LlamaEmbedding = make_embedding_engine(allocator, io, init.environ_map);
+        // Try native llama.cpp first (-Dllama), then subprocess, then FNV fallback.
+        var native_llama = initNativeLlama(init.environ_map);
+        defer if (native_llama) |*nl| nl.deinit();
+        if (native_llama) |*nl| g_native_llama = nl;
+        defer g_native_llama = null;
+
+        var embedding_engine: ?qmd.llm.LlamaEmbedding = if (native_llama == null)
+            make_embedding_engine(allocator, io, init.environ_map)
+        else
+            null;
         defer if (embedding_engine) |*e| e.deinit();
-        const use_real_engine = embedding_engine != null;
+        const use_real_engine = native_llama != null or embedding_engine != null;
 
         var fallback_engine: ?qmd.llm.LlamaCpp = if (!use_real_engine)
             qmd.llm.LlamaCpp.init("/dev/null", allocator) catch null
@@ -484,7 +553,18 @@ pub fn main(init: std.process.Init) !void {
                         try chunk_slices.appendSlice(allocator, chunks.chunks.items);
                     }
 
-                    if (embedding_engine) |*engine| {
+                    if (g_native_llama != null) {
+                        for (chunk_slices.items, 0..) |chunk, idx| {
+                            const formatted = qmd.llm.formatDocForEmbedding(allocator, chunk) catch continue;
+                            defer allocator.free(formatted);
+                            const emb = nativeEmbedFn(allocator, formatted, false) catch continue;
+                            defer allocator.free(emb);
+                            qmd.store.upsertContentVectorAt(&db_, doc_hash[0..], @intCast(idx), 0, "native-llama", emb, allocator) catch |err| {
+                                if (err == error.OutOfMemory) return err;
+                                continue;
+                            };
+                        }
+                    } else if (embedding_engine) |*engine| {
                         for (chunk_slices.items, 0..) |chunk, idx| {
                             const formatted = qmd.llm.formatDocForEmbedding(allocator, chunk) catch continue;
                             defer allocator.free(formatted);
@@ -572,12 +652,20 @@ pub fn main(init: std.process.Init) !void {
         };
         defer db_.close();
 
+        // Init native llama if available for hybrid search
+        var native_llama_q = initNativeLlama(init.environ_map);
+        defer if (native_llama_q) |*nl| nl.deinit();
+        if (native_llama_q) |*nl| g_native_llama = nl;
+        defer g_native_llama = null;
+
         var result = qmd.search.hybridSearch(&db_, allocator, io, query_text, null, .{
             .enable_vector = true,
             .enable_query_expansion = enable_expand,
             .enable_rerank = enable_rerank,
             .rrf_k = qmd.search.RRF_K,
             .max_results = 10,
+            .embed_fn = getNativeEmbedFn(),
+            .expand_query_fn = if (enable_expand) getNativeExpandQueryFn() else null,
         }) catch {
             try stdout.writeAll("Search failed\n");
             try stdout.flush();
@@ -675,9 +763,16 @@ pub fn main(init: std.process.Init) !void {
         };
         defer db_.close();
 
+        // Init native llama if available for context search
+        var native_llama_ctx = initNativeLlama(init.environ_map);
+        defer if (native_llama_ctx) |*nl| nl.deinit();
+        if (native_llama_ctx) |*nl| g_native_llama = nl;
+        defer g_native_llama = null;
+
         var result = qmd.search.hybridSearch(&db_, allocator, io, query_text, null, .{
             .enable_vector = true,
             .max_results = 5,
+            .embed_fn = getNativeEmbedFn(),
         }) catch {
             try stdout.writeAll("Context search failed\n");
             try stdout.flush();
@@ -904,7 +999,13 @@ pub fn main(init: std.process.Init) !void {
         };
         defer db_.close();
 
-        const result = qmd.search.searchVec(&db_, allocator, query_text, null, null) catch {
+        // Init native llama if available for vector search
+        var native_llama_vs = initNativeLlama(init.environ_map);
+        defer if (native_llama_vs) |*nl| nl.deinit();
+        if (native_llama_vs) |*nl| g_native_llama = nl;
+        defer g_native_llama = null;
+
+        const result = qmd.search.searchVec(&db_, allocator, query_text, null, getNativeEmbedFn()) catch {
             try stdout.writeAll("Vector search failed\n");
             try stdout.flush();
             return;
@@ -1285,12 +1386,31 @@ pub fn main(init: std.process.Init) !void {
             try stdout.flush();
             return;
         };
-        var llm = qmd.llm.LlamaCpp.init("/fake", allocator) catch {
+
+        // Try native llama first, fall back to FNV hash embedding
+        var native_llama_e = initNativeLlama(init.environ_map);
+        defer if (native_llama_e) |*nl| nl.deinit();
+
+        if (native_llama_e) |*nl| {
+            const emb = nl.embed(text) catch {
+                try stdout.writeAll("Native embed failed\n");
+                return;
+            };
+            defer nl.allocator.free(emb);
+            try stdout.print("Embedding ({d} dims, native): [{d:.4}", .{ emb.len, emb[0] });
+            if (emb.len > 1) try stdout.print(", {d:.4}", .{emb[1]});
+            if (emb.len > 2) try stdout.print(", {d:.4}...", .{emb[2]});
+            try stdout.writeAll("]\n");
+            try stdout.flush();
+            return;
+        }
+
+        var llm_fallback = qmd.llm.LlamaCpp.init("/fake", allocator) catch {
             try stdout.writeAll("Failed to init LLM\n");
             return;
         };
-        defer llm.deinit();
-        const emb = llm.embed(text, allocator) catch {
+        defer llm_fallback.deinit();
+        const emb = llm_fallback.embed(text, allocator) catch {
             try stdout.writeAll("Failed to embed text\n");
             return;
         };
