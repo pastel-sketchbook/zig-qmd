@@ -9,6 +9,14 @@ pub const SearchError = error{
     NoResults,
 } || db.DbError;
 
+/// Function type for embedding text into a float vector.
+/// The caller owns the returned slice.
+pub const EmbedFn = *const fn (allocator: std.mem.Allocator, text: []const u8, is_query: bool) anyerror![]f32;
+
+/// Function type for expanding a query with related terms.
+/// The caller owns the returned slice.
+pub const ExpandQueryFn = *const fn (allocator: std.mem.Allocator, query: []const u8) anyerror![]const u8;
+
 /// Parses user input into an FTS5 query string, handling negation, prefix
 /// matching, and hyphenated terms.
 pub fn buildFTS5Query(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
@@ -251,30 +259,47 @@ pub fn hybridSearch(
             return .{ .results = try std.ArrayList(SearchResult).initCapacity(allocator, 0), .fts_count = 0, .vec_count = 0 };
         }
 
-        // Note: In Zig 0.16, env var access is through Init.environ_map.
-        // Library code should receive these paths from the caller.
-        // For now, skip model-based expansion in the library layer.
-        const bin_path: ?[]const u8 = null;
-        const model_path: ?[]const u8 = null;
+        // Try native expand_query_fn first, then fall back to subprocess-based expansion.
+        if (options.expand_query_fn) |expand_fn| {
+            const cache_key = llm.buildCacheKey("expand", "native", query);
+            const cached = llm.cacheGet(db_, cache_key[0..], allocator) catch null;
+            if (cached) |q_cached| {
+                expanded_query_owned = q_cached;
+                effective_query = q_cached;
+            } else {
+                const expanded = expand_fn(allocator, query) catch null;
+                if (expanded) |q| {
+                    expanded_query_owned = q;
+                    effective_query = q;
+                    llm.cachePut(db_, cache_key[0..], q) catch |err| {
+                        if (err == error.OutOfMemory) return err;
+                    };
+                }
+            }
+        } else {
+            // Subprocess fallback path
+            const bin_path: ?[]const u8 = null;
+            const model_path: ?[]const u8 = null;
 
-        const model_key = if (model_path) |m| m else "heuristic";
-        const cache_key = llm.buildCacheKey("expand", model_key, query);
-        const cached = llm.cacheGet(db_, cache_key[0..], allocator) catch null;
-        if (cached) |q_cached| {
-            expanded_query_owned = q_cached;
-            effective_query = q_cached;
-        }
+            const model_key = if (model_path) |m| m else "heuristic";
+            const cache_key = llm.buildCacheKey("expand", model_key, query);
+            const cached = llm.cacheGet(db_, cache_key[0..], allocator) catch null;
+            if (cached) |q_cached| {
+                expanded_query_owned = q_cached;
+                effective_query = q_cached;
+            }
 
-        const expanded = if (cached == null)
-            (llm.expandQueryWithModel(allocator, io, query, bin_path, model_path) catch null)
-        else
-            null;
-        if (expanded) |q| {
-            expanded_query_owned = q;
-            effective_query = q;
-            llm.cachePut(db_, cache_key[0..], q) catch |err| {
-                if (err == error.OutOfMemory) return err;
-            };
+            const expanded = if (cached == null)
+                (llm.expandQueryWithModel(allocator, io, query, bin_path, model_path) catch null)
+            else
+                null;
+            if (expanded) |q| {
+                expanded_query_owned = q;
+                effective_query = q;
+                llm.cachePut(db_, cache_key[0..], q) catch |err| {
+                    if (err == error.OutOfMemory) return err;
+                };
+            }
         }
     }
 
@@ -307,7 +332,7 @@ pub fn hybridSearch(
         if (is_aborted(options.abort_signal)) {
             return .{ .results = try std.ArrayList(SearchResult).initCapacity(allocator, 0), .fts_count = 0, .vec_count = 0 };
         }
-        const vec_result = try searchVec(db_, allocator, effective_query, collection);
+        const vec_result = try searchVec(db_, allocator, effective_query, collection, options.embed_fn);
         vec_scored = vec_result.results;
     }
     defer {
@@ -326,7 +351,7 @@ pub fn hybridSearch(
         if (is_aborted(options.abort_signal)) {
             return .{ .results = try std.ArrayList(SearchResult).initCapacity(allocator, 0), .fts_count = 0, .vec_count = 0 };
         }
-        const reranked = try rerankByEmbedding(db_, allocator, io, effective_query, fused);
+        const reranked = try rerankByEmbedding(db_, allocator, io, effective_query, fused, options.embed_fn);
         freeScoredResultSlice(fused, allocator);
         allocator.free(fused);
         fused = reranked;
@@ -374,6 +399,10 @@ pub const HybridOptions = struct {
     rrf_k: f64 = RRF_K,
     max_results: usize = 20,
     min_score: f64 = 0.0,
+    /// Optional embedding function. When null, uses built-in FNV fallback.
+    embed_fn: ?EmbedFn = null,
+    /// Optional query expansion function. When null, uses heuristic fallback.
+    expand_query_fn: ?ExpandQueryFn = null,
 };
 
 fn is_aborted(signal: ?*const std.atomic.Value(bool)) bool {
@@ -381,8 +410,11 @@ fn is_aborted(signal: ?*const std.atomic.Value(bool)) bool {
     return false;
 }
 
-fn rerankByEmbedding(db_: *db.Db, allocator: std.mem.Allocator, io: std.Io, query: []const u8, results: []ScoredResult) ![]ScoredResult {
-    const q_emb = try embed_text(allocator, query, true);
+fn rerankByEmbedding(db_: *db.Db, allocator: std.mem.Allocator, io: std.Io, query: []const u8, results: []ScoredResult, embed_fn: ?EmbedFn) ![]ScoredResult {
+    const q_emb = if (embed_fn) |f|
+        try f(allocator, query, true)
+    else
+        try embed_text(allocator, query, true);
     defer allocator.free(q_emb);
 
     // In Zig 0.16, env var access is through Init.environ_map.
@@ -421,7 +453,10 @@ fn rerankByEmbedding(db_: *db.Db, allocator: std.mem.Allocator, io: std.Io, quer
         owned_passages[i] = passage_copy;
         passages[i] = passage_copy;
 
-        const d_emb = embed_text(allocator, source_text, false) catch q_emb;
+        const d_emb = if (embed_fn) |f|
+            (f(allocator, source_text, false) catch q_emb)
+        else
+            (embed_text(allocator, source_text, false) catch q_emb);
         defer if (d_emb.ptr != q_emb.ptr) allocator.free(d_emb);
 
         const cosine = llm.cosineSimilarity(q_emb, d_emb);
@@ -488,8 +523,12 @@ pub fn searchVec(
     allocator: std.mem.Allocator,
     query: []const u8,
     collection: ?[]const u8,
+    embed_fn: ?EmbedFn,
 ) !struct { results: []ScoredResult } {
-    const query_embedding = try embed_query(allocator, query);
+    const query_embedding = if (embed_fn) |f|
+        try f(allocator, query, true)
+    else
+        try embed_query(allocator, query);
     defer allocator.free(query_embedding);
 
     // Try native sqlite-vec first; fallback to JSON cosine path.
@@ -790,7 +829,7 @@ test "searchVec uses stored vectors and ranks by cosine" {
     try store.upsertContentVector(&db_, doc_a.hash, "test", q_emb, std.heap.page_allocator);
     try store.upsertContentVector(&db_, doc_b.hash, "test", b_emb, std.heap.page_allocator);
 
-    const result = try searchVec(&db_, std.heap.page_allocator, "auth", null);
+    const result = try searchVec(&db_, std.heap.page_allocator, "auth", null, null);
     try std.testing.expect(result.results.len >= 2);
     try std.testing.expect(result.results[0].score >= result.results[1].score);
 }

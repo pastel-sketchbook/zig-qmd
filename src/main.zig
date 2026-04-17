@@ -904,7 +904,7 @@ pub fn main(init: std.process.Init) !void {
         };
         defer db_.close();
 
-        const result = qmd.search.searchVec(&db_, allocator, query_text, null) catch {
+        const result = qmd.search.searchVec(&db_, allocator, query_text, null, null) catch {
             try stdout.writeAll("Vector search failed\n");
             try stdout.flush();
             return;
