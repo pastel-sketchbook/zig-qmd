@@ -2,6 +2,10 @@ const std = @import("std");
 const db = @import("db.zig");
 const store = @import("store.zig");
 const llm = @import("llm.zig");
+const build_options = @import("build_options");
+const llm_native = if (build_options.enable_llama) @import("llm_native.zig") else struct {
+    pub const NativeLlamaError = error{};
+};
 
 /// Error set for search operations.
 pub const SearchError = error{
@@ -9,13 +13,19 @@ pub const SearchError = error{
     NoResults,
 } || db.DbError;
 
+pub const CallbackError = error{
+    NativeLlamaNotInitialized,
+    NativeLlamaNotAvailable,
+    OutOfMemory,
+} || llm_native.NativeLlamaError;
+
 /// Function type for embedding text into a float vector.
 /// The caller owns the returned slice.
-pub const EmbedFn = *const fn (allocator: std.mem.Allocator, text: []const u8, is_query: bool) anyerror![]f32;
+pub const EmbedFn = *const fn (allocator: std.mem.Allocator, text: []const u8, is_query: bool) CallbackError![]f32;
 
 /// Function type for expanding a query with related terms.
 /// The caller owns the returned slice.
-pub const ExpandQueryFn = *const fn (allocator: std.mem.Allocator, query: []const u8) anyerror![]const u8;
+pub const ExpandQueryFn = *const fn (allocator: std.mem.Allocator, query: []const u8) CallbackError![]const u8;
 
 /// Parses user input into an FTS5 query string, handling negation, prefix
 /// matching, and hyphenated terms.

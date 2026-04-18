@@ -22,6 +22,7 @@ var g_native_llama: ?*NativeLlamaType = null;
 const NativeLlamaType = if (build_options.enable_llama) qmd.llm_native.NativeLlama else struct {
     pub fn deinit(_: *@This()) void {}
     pub fn embed(_: *@This(), _: []const u8) error{}![]f32 {
+        // Invariant: this stub is only compiled when native llama support is disabled.
         unreachable;
     }
     pub fn supportsEmbedding(_: *const @This()) bool {
@@ -32,10 +33,10 @@ const NativeLlamaType = if (build_options.enable_llama) qmd.llm_native.NativeLla
 /// EmbedFn-compatible wrapper that delegates to the embed llama instance.
 /// NativeLlama uses page_allocator internally, so we copy the result into
 /// the caller's allocator and free the original.
-fn nativeEmbedFn(allocator: std.mem.Allocator, text: []const u8, _: bool) anyerror![]f32 {
+fn nativeEmbedFn(allocator: std.mem.Allocator, text: []const u8, _: bool) qmd.search.CallbackError![]f32 {
     if (build_options.enable_llama) {
         const llama = g_embed_llama orelse return error.NativeLlamaNotInitialized;
-        const native_result = llama.embed(text) catch |e| return @as(anyerror, e);
+        const native_result = llama.embed(text) catch |e| return e;
         // Copy from page_allocator to caller's allocator
         const result = allocator.alloc(f32, native_result.len) catch return error.OutOfMemory;
         @memcpy(result, native_result);
@@ -94,7 +95,7 @@ fn sanitizeExpandedQuery(allocator: std.mem.Allocator, query: []const u8, genera
 }
 
 /// ExpandQueryFn-compatible wrapper that delegates to the generation llama instance.
-fn nativeExpandQueryFn(allocator: std.mem.Allocator, query: []const u8) anyerror![]const u8 {
+fn nativeExpandQueryFn(allocator: std.mem.Allocator, query: []const u8) qmd.search.CallbackError![]const u8 {
     if (build_options.enable_llama) {
         const llama = g_native_llama orelse return error.NativeLlamaNotInitialized;
         const prompt = try std.fmt.allocPrint(
@@ -106,7 +107,7 @@ fn nativeExpandQueryFn(allocator: std.mem.Allocator, query: []const u8) anyerror
             .{query},
         );
         defer allocator.free(prompt);
-        const result = llama.generate(prompt, 64) catch |e| return @as(anyerror, e);
+        const result = llama.generate(prompt, 64) catch |e| return e;
         defer std.heap.page_allocator.free(result);
         return sanitizeExpandedQuery(allocator, query, result);
     }
