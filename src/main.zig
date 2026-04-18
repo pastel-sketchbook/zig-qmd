@@ -777,12 +777,12 @@ pub fn main(init: std.process.Init) !void {
 
     if (std.mem.eql(u8, cmd, "context")) {
         const first_arg = args.next() orelse {
-            try stdout.writeAll("Usage: zmd context <query> [--json|--csv|--md] [--sort=score|--sort=index]\n");
+            try stdout.writeAll("Usage: zmd context <query> [--json|--csv|--md] [--sort=score|--sort=index] [--no-answer]\n");
             try stdout.flush();
             return;
         };
         if (std.mem.eql(u8, first_arg, "--help") or std.mem.eql(u8, first_arg, "-h")) {
-            try stdout.writeAll("Usage: zmd context <query> [--json|--csv|--md] [--sort=score|--sort=index]\n");
+            try stdout.writeAll("Usage: zmd context <query> [--json|--csv|--md] [--sort=score|--sort=index] [--no-answer]\n");
             try stdout.flush();
             return;
         }
@@ -790,11 +790,14 @@ pub fn main(init: std.process.Init) !void {
 
         var output_format: OutputFormat = .text;
         var sort_order: SortOrder = .score;
+        var enable_answer = true;
         while (args.next()) |arg| {
             if (parseOutputFlag(arg)) |fmt| {
                 output_format = fmt;
             } else if (parseSortFlag(arg)) |so| {
                 sort_order = so;
+            } else if (std.mem.eql(u8, arg, "--no-answer")) {
+                enable_answer = false;
             }
         }
 
@@ -915,6 +918,64 @@ pub fn main(init: std.process.Init) !void {
                     }
                 }
             },
+        }
+
+        // RAG answer generation using the generation model
+        if (enable_answer and build_options.enable_llama and result.results.items.len > 0) {
+            if (g_native_llama) |llama| {
+                // Build context from top search results
+                var context_buf: std.ArrayList(u8) = .empty;
+                defer context_buf.deinit(allocator);
+
+                for (result.results.items, 0..) |r, i| {
+                    if (i >= 5) break; // Limit context to top 5
+                    const doc = qmd.store.findActiveDocument(&db_, r.collection, r.path, allocator) catch continue;
+                    defer {
+                        allocator.free(doc.title);
+                        allocator.free(doc.hash);
+                        allocator.free(doc.doc);
+                    }
+                    const snippet = extractSnippet(allocator, query_text, doc.doc) catch continue;
+                    defer allocator.free(snippet);
+
+                    context_buf.appendSlice(allocator, "---\n") catch continue;
+                    context_buf.appendSlice(allocator, "Source: ") catch continue;
+                    context_buf.appendSlice(allocator, r.title) catch continue;
+                    context_buf.appendSlice(allocator, " (") catch continue;
+                    context_buf.appendSlice(allocator, r.path) catch continue;
+                    context_buf.appendSlice(allocator, ")\n") catch continue;
+                    context_buf.appendSlice(allocator, snippet) catch continue;
+                    context_buf.appendSlice(allocator, "\n") catch continue;
+                }
+
+                if (context_buf.items.len > 0) {
+                    // Build user message with context
+                    const user_msg = std.fmt.allocPrint(allocator, "Based on the following documents, answer the question.\n\n" ++
+                        "Documents:\n{s}\n---\n\nQuestion: {s}", .{ context_buf.items, query_text }) catch {
+                        try stdout.flush();
+                        return;
+                    };
+                    defer allocator.free(user_msg);
+
+                    const system_prompt = "You are a helpful assistant that answers questions based on the provided documents. " ++
+                        "Be concise and cite sources by title when relevant. If the documents don't contain enough " ++
+                        "information to answer, say so.";
+
+                    try stdout.writeAll("\n--- Answer ---\n\n");
+                    try stdout.flush();
+
+                    const answer = llama.chat(system_prompt, user_msg, 512, false) catch {
+                        try stdout.writeAll("(generation failed)\n");
+                        try stdout.flush();
+                        return;
+                    };
+                    // chat() returns page_allocator memory — free with page_allocator
+                    defer std.heap.page_allocator.free(answer);
+
+                    try stdout.writeAll(answer);
+                    try stdout.writeAll("\n");
+                }
+            }
         }
 
         try stdout.flush();

@@ -179,6 +179,9 @@ pub const NativeLlama = struct {
             var new_token = c.llama_sampler_sample(sampler, ctx, -1);
             if (new_token == eos) break;
 
+            // Also check for EOT token (Gemma 4 uses a separate eot_id)
+            if (c.llama_vocab_eot(vocab) != c.LLAMA_TOKEN_NULL and new_token == c.llama_vocab_eot(vocab)) break;
+
             // Detokenize
             const n = c.llama_token_to_piece(vocab, new_token, &buf, @intCast(buf.len), 0, true);
             if (n > 0) {
@@ -186,11 +189,40 @@ pub const NativeLlama = struct {
                     return NativeLlamaError.OutOfMemory;
             }
 
+            // Stop if output ends with turn markers
+            if (output.items.len >= 14 and std.mem.endsWith(u8, output.items, "<end_of_turn>")) {
+                output.shrinkRetainingCapacity(output.items.len - 14);
+                break;
+            }
+            if (output.items.len >= 16 and std.mem.endsWith(u8, output.items, "</start_of_turn>")) {
+                output.shrinkRetainingCapacity(output.items.len - 16);
+                break;
+            }
+            if (output.items.len >= 7 and std.mem.endsWith(u8, output.items, "<turn|>")) {
+                output.shrinkRetainingCapacity(output.items.len - 7);
+                break;
+            }
+
             // Prepare next batch
             const next_batch = c.llama_batch_get_one(&new_token, 1);
             if (c.llama_decode(ctx, next_batch) != 0)
                 return NativeLlamaError.DecodeFailed;
             n_decoded += 1;
+        }
+
+        // Trim any trailing turn markers that slipped through
+        while (output.items.len >= 14 and std.mem.endsWith(u8, output.items, "<end_of_turn>")) {
+            output.shrinkRetainingCapacity(output.items.len - 14);
+        }
+        while (output.items.len >= 16 and std.mem.endsWith(u8, output.items, "</start_of_turn>")) {
+            output.shrinkRetainingCapacity(output.items.len - 16);
+        }
+        while (output.items.len >= 7 and std.mem.endsWith(u8, output.items, "<turn|>")) {
+            output.shrinkRetainingCapacity(output.items.len - 7);
+        }
+        // Trim trailing whitespace
+        while (output.items.len > 0 and (output.items[output.items.len - 1] == ' ' or output.items[output.items.len - 1] == '\n' or output.items[output.items.len - 1] == '\r')) {
+            output.shrinkRetainingCapacity(output.items.len - 1);
         }
 
         return output.toOwnedSlice(self.allocator) catch return NativeLlamaError.OutOfMemory;
