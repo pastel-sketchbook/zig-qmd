@@ -145,7 +145,8 @@ Query text
 - `NativeLlama` struct: embed, generate, chat with Gemma 4 E2B template
 - Pluggable `EmbedFn`/`ExpandQueryFn` function pointers in search pipeline
 - Dual-model architecture: `QMD_EMBED_MODEL` for embedding, `QMD_MODEL` for generation/query expansion/chat
-- CLI wired: `update`, `vsearch`, `query`, `context`, `embed` use dedicated embed model; `query` uses generation model for expansion
+- CLI wired: `update`, `vsearch`, `query`, `context`, `embed` use dedicated embed model; `query` uses generation model for expansion; `context` uses generation model for RAG answer generation
+- `context` command: hybrid search → top 5 snippets → Gemma 4 chat → grounded answer (--no-answer to skip)
 - Falls back to subprocess/FNV when `-Dllama` not enabled or no model env vars set
 
 **Phase 3 — Hybrid Pipeline + Reranking:** Partially complete.

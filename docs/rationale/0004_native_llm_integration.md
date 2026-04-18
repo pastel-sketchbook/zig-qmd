@@ -65,7 +65,8 @@ src/main.zig  ────────────────→  g_native_llam
    
    `QMD_EMBED_MODEL` falls back to `QMD_MODEL` if not set. The CLI uses
    `g_embed_llama` for all embedding operations and `g_native_llama` for
-   generation. Zig function pointers can't capture state, so module-level
+   generation (query expansion in `query`, RAG answers in `context`).
+   Zig function pointers can't capture state, so module-level
    globals bridge the gap.
 
 5. **Static library linking, not dynamic.**
@@ -78,6 +79,7 @@ src/main.zig  ────────────────→  g_native_llam
 
 **Positive:**
 - `zmd` can embed documents and expand queries without any external process.
+- `context` command generates grounded RAG answers from search results on-device.
 - Sub-millisecond embedding call overhead (no process spawn, no JSON parse).
 - Single binary distribution — no need to ship llama.cpp alongside zmd.
 - Backward compatible — builds without `-Dllama` are unchanged.

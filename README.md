@@ -46,6 +46,10 @@ zmd update
 zmd vsearch "semantic search query"
 zmd embed "test embedding"
 zmd query "hybrid search with query expansion"
+
+# RAG answer generation (requires QMD_MODEL)
+zmd context "how does authentication work"
+zmd context "deploy steps" --no-answer  # snippets only, skip generation
 ```
 
 If `QMD_EMBED_MODEL` is not set, it falls back to `QMD_MODEL`. Without `-Dllama`
