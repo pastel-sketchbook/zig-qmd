@@ -151,6 +151,10 @@ tasks:
         $ZMD query "how to deploy the application" 2>&1 | grep -v '^ggml\|^llama\|^print_info\|^load\|^create_tensor\|^sched\|^graph\|^set_abort\|^done_getting\|^\.\.\|^~llama\|^kernel\|^init_token'
 
         echo ""
+        echo "=== Context (RAG answer) ==="
+        $ZMD context "how does authentication work" 2>&1 | grep -v '^ggml\|^llama_\|^print_info\|^load\|^create_tensor\|^sched\|^graph\|^set_abort\|^done_getting\|^\.\.\|^~llama\|^kernel\|^init_token\|compiling pipeline\|^loaded kernel'
+
+        echo ""
         echo "E2E llama test complete!"
 
   e2e:llama:embed-only:
