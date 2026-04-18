@@ -23,6 +23,7 @@ pub const NativeLlama = struct {
 
     /// Loads a GGUF model file and initializes the llama backend.
     pub fn init(allocator: std.mem.Allocator, model_path: [*:0]const u8) NativeLlamaError!NativeLlama {
+        c.llama_log_set(silentLogCallback, null);
         c.llama_backend_init();
 
         var mparams = c.llama_model_default_params();
@@ -265,6 +266,8 @@ pub const NativeLlama = struct {
         return self.generate(full_prompt, max_tokens);
     }
 };
+
+fn silentLogCallback(_: c.enum_ggml_log_level, _: [*c]const u8, _: ?*anyopaque) callconv(.c) void {}
 
 /// Formats a Gemma 4 chat prompt from system + user messages.
 /// Useful for building prompts outside of NativeLlama.

@@ -364,7 +364,11 @@ pub fn hybridSearch(
         final_results.deinit(allocator);
     }
 
-    for (fused[0..@min(fused.len, options.max_results)]) |r| {
+    var kept: usize = 0;
+    for (fused) |r| {
+        if (kept >= options.max_results) break;
+        if (r.score < options.min_score) continue;
+
         var title = r.title;
         var hash = r.hash;
         var doc_to_free: ?store.ActiveDocument = null;
@@ -390,6 +394,7 @@ pub fn hybridSearch(
             allocator.free(d.doc);
         }
         try final_results.append(allocator, result_entry);
+        kept += 1;
     }
 
     return .{ .results = final_results, .fts_count = fts_scored.items.len, .vec_count = vec_scored.len };
@@ -879,6 +884,26 @@ test "hybridSearch supports rerank option" {
     defer result.deinit(std.heap.page_allocator);
 
     try std.testing.expect(result.results.items.len > 0);
+}
+
+test "hybridSearch filters results below min_score" {
+    var db_ = try db.Db.open(":memory:");
+    defer db_.close();
+    try db.initSchema(&db_);
+
+    _ = try store.insertDocument(&db_, "test", "a.md", "# Bevy\nRust game ECS");
+    _ = try store.insertDocument(&db_, "test", "b.md", "# Unrelated\nGeneric development topic");
+
+    var result = try hybridSearch(&db_, std.heap.page_allocator, std.testing.io, "Bevy Rust game ECS", null, .{
+        .enable_vector = false,
+        .enable_query_expansion = false,
+        .enable_rerank = false,
+        .max_results = 10,
+        .min_score = 0.95,
+    });
+    defer result.deinit(std.heap.page_allocator);
+
+    try std.testing.expectEqual(@as(usize, 0), result.results.items.len);
 }
 
 test "hybridSearch supports abort signal" {

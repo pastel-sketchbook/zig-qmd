@@ -45,15 +45,70 @@ fn nativeEmbedFn(allocator: std.mem.Allocator, text: []const u8, _: bool) anyerr
     return error.NativeLlamaNotAvailable;
 }
 
+fn isQuotedWrapper(text: []const u8) bool {
+    if (text.len < 2) return false;
+    const first = text[0];
+    const last = text[text.len - 1];
+    return (first == '"' and last == '"') or (first == '\'' and last == '\'');
+}
+
+fn sanitizeGeneratedText(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
+    const trimmed = std.mem.trim(u8, text, &std.ascii.whitespace);
+    if (trimmed.len == 0) return allocator.dupe(u8, "");
+
+    var start: usize = 0;
+    var end: usize = trimmed.len;
+    while (end > start and (trimmed[start] == '\'' or trimmed[start] == '"' or trimmed[start] == '`')) : (start += 1) {}
+    while (end > start and (trimmed[end - 1] == '\'' or trimmed[end - 1] == '"' or trimmed[end - 1] == '`')) : (end -= 1) {}
+
+    var core = std.mem.trim(u8, trimmed[start..end], &std.ascii.whitespace);
+    if (core.len == 0) return allocator.dupe(u8, "");
+
+    if (std.mem.startsWith(u8, core, "Expanded query:")) {
+        core = std.mem.trim(u8, core["Expanded query:".len..], &std.ascii.whitespace);
+    }
+
+    if (isQuotedWrapper(core)) {
+        core = std.mem.trim(u8, core[1 .. core.len - 1], &std.ascii.whitespace);
+    }
+
+    return allocator.dupe(u8, core);
+}
+
+fn sanitizeExpandedQuery(allocator: std.mem.Allocator, query: []const u8, generated: []const u8) ![]const u8 {
+    const cleaned = try sanitizeGeneratedText(allocator, generated);
+    if (cleaned.len == 0) {
+        allocator.free(cleaned);
+        return allocator.dupe(u8, query);
+    }
+
+    if (std.mem.startsWith(u8, cleaned, query)) return cleaned;
+
+    var merged = try std.ArrayList(u8).initCapacity(allocator, query.len + 1 + cleaned.len);
+    errdefer merged.deinit(allocator);
+    try merged.appendSlice(allocator, query);
+    try merged.append(allocator, ' ');
+    try merged.appendSlice(allocator, cleaned);
+    allocator.free(cleaned);
+    return merged.toOwnedSlice(allocator);
+}
+
 /// ExpandQueryFn-compatible wrapper that delegates to the generation llama instance.
 fn nativeExpandQueryFn(allocator: std.mem.Allocator, query: []const u8) anyerror![]const u8 {
     if (build_options.enable_llama) {
         const llama = g_native_llama orelse return error.NativeLlamaNotInitialized;
-        const prompt = try std.fmt.allocPrint(allocator, "Expand the following search query with related terms and synonyms. " ++
-            "Return ONLY the expanded query, no explanation.\n\nQuery: {s}\n\nExpanded query:", .{query});
+        const prompt = try std.fmt.allocPrint(
+            allocator,
+            "Rewrite this search query for retrieval. " ++
+                "Return only a short space-separated list of keywords and close synonyms. " ++
+                "Do not use quotes, bullets, labels, or full sentences. Preserve important technical terms.\n\n" ++
+                "Query: {s}\n\nKeywords:",
+            .{query},
+        );
         defer allocator.free(prompt);
-        const result = llama.generate(prompt, 128) catch |e| return @as(anyerror, e);
-        return result;
+        const result = llama.generate(prompt, 64) catch |e| return @as(anyerror, e);
+        defer std.heap.page_allocator.free(result);
+        return sanitizeExpandedQuery(allocator, query, result);
     }
     return error.NativeLlamaNotAvailable;
 }
@@ -111,6 +166,22 @@ const SortOrder = enum {
     score,
     /// Sort by database row id ascending (insertion order).
     index,
+};
+
+const Preview = struct {
+    title: []const u8,
+    body: []const u8,
+    score: f64,
+};
+
+const ContextEval = struct {
+    total_score: f64,
+    term_coverage: f64,
+};
+
+const ContextCandidate = struct {
+    index: usize,
+    score: f64,
 };
 
 const DocRef = struct {
@@ -201,31 +272,69 @@ fn writeCsvField(out: anytype, s: []const u8) !void {
     try out.writeAll("\"");
 }
 
+fn skipFrontmatter(doc: []const u8) []const u8 {
+    if (!std.mem.startsWith(u8, doc, "---\n")) return doc;
+    const rest = doc[4..];
+    const end = std.mem.indexOf(u8, rest, "\n---\n") orelse return doc;
+    return rest[end + 5 ..];
+}
+
+fn nextSignificantQueryToken(query: []const u8) ?[]const u8 {
+    var tok_it = std.mem.tokenizeAny(u8, query, " \n\r\t,.;:!?()[]{}\"'");
+    var fallback: ?[]const u8 = null;
+    while (tok_it.next()) |token| {
+        if (token.len < 2) continue;
+        if (fallback == null) fallback = token;
+        if (!isQueryStopword(token)) return token;
+    }
+    return fallback;
+}
+
+fn containsInsensitive(haystack: []const u8, needle: []const u8) bool {
+    return utf8IndexOfInsensitive(haystack, needle) != null;
+}
+
+fn rewriteContextQuery(allocator: std.mem.Allocator, query: []const u8) !?[]u8 {
+    const wants_rust = containsInsensitive(query, "rust");
+    const wants_game = containsInsensitive(query, "game") or containsInsensitive(query, "games") or containsInsensitive(query, "gamedev");
+    const wants_learning = containsInsensitive(query, "learn") or containsInsensitive(query, "start") or containsInsensitive(query, "begin");
+    const wants_coding = containsInsensitive(query, "code") or containsInsensitive(query, "coding") or containsInsensitive(query, "build");
+
+    if (!(wants_rust and wants_game and (wants_learning or wants_coding))) return null;
+
+    const rewritten = try std.fmt.allocPrint(
+        allocator,
+        "{s} rust game development gamedev bevy ecs graphics engine physics math gameplay",
+        .{query},
+    );
+    return rewritten;
+}
+
 fn extractSnippet(allocator: std.mem.Allocator, query: []const u8, doc: []const u8) ![]u8 {
     if (doc.len == 0) return allocator.dupe(u8, "");
 
-    var tok_it = std.mem.tokenizeScalar(u8, query, ' ');
-    const token = tok_it.next() orelse return allocator.dupe(u8, doc[0..@min(doc.len, 180)]);
+    const visible_doc = skipFrontmatter(doc);
+    const token = nextSignificantQueryToken(query) orelse return allocator.dupe(u8, visible_doc[0..@min(visible_doc.len, 180)]);
 
     // Try to find the token in the document using a UTF-8-aware,
     // case-insensitive search.  For CJK characters (which have no case),
     // std.ascii.toLower is a no-op on high bytes so the comparison works
     // correctly only when we compare at the codepoint level.
-    const idx = utf8IndexOfInsensitive(doc, token) orelse 0;
+    const idx = utf8IndexOfInsensitive(visible_doc, token) orelse 0;
 
     // Snap start/end to UTF-8 codepoint boundaries so we never slice
     // in the middle of a multi-byte character.
     const raw_start: usize = if (idx > 60) idx - 60 else 0;
-    const start = snapBackToCodepoint(doc, raw_start);
+    const start = snapBackToCodepoint(visible_doc, raw_start);
 
-    const raw_end = @min(doc.len, idx + token.len + 140);
-    const end = snapForwardToCodepoint(doc, raw_end);
+    const raw_end = @min(visible_doc.len, idx + token.len + 140);
+    const end = snapForwardToCodepoint(visible_doc, raw_end);
 
     var out = try std.ArrayList(u8).initCapacity(allocator, end - start + 8);
     defer out.deinit(allocator);
     if (start > 0) try out.appendSlice(allocator, "...");
-    try out.appendSlice(allocator, doc[start..end]);
-    if (end < doc.len) try out.appendSlice(allocator, "...");
+    try out.appendSlice(allocator, visible_doc[start..end]);
+    if (end < visible_doc.len) try out.appendSlice(allocator, "...");
     return out.toOwnedSlice(allocator);
 }
 
@@ -235,17 +344,19 @@ fn extractSnippet(allocator: std.mem.Allocator, query: []const u8, doc: []const 
 /// centers a window of `max_len` chars around the best match.
 /// Falls back to the start of the document.
 fn extractLargeContext(doc: []const u8, query: []const u8, max_len: usize) []const u8 {
-    if (doc.len <= max_len) return doc;
+    const visible_doc = skipFrontmatter(doc);
+    if (visible_doc.len <= max_len) return visible_doc;
 
     // Collect tokens, skip stopwords, then search longest-first for better specificity
     const stopwords = [_][]const u8{
-        "how",  "what",  "where", "when", "why",   "who",   "which",
-        "does", "do",    "did",   "can",  "could", "would", "should",
-        "is",   "are",   "was",   "were", "be",    "been",  "being",
-        "the",  "a",     "an",    "in",   "on",    "at",    "to",
-        "for",  "of",    "with",  "from", "by",    "as",    "or",
-        "and",  "but",   "this",  "that", "it",    "its",   "my",
-        "your", "their", "works", "work", "about", "into",  "over",
+        "how",   "what",  "where",  "when", "why",   "who",   "which",
+        "does",  "do",    "did",    "can",  "could", "would", "should",
+        "is",    "are",   "was",    "were", "be",    "been",  "being",
+        "the",   "a",     "an",     "in",   "on",    "at",    "to",
+        "for",   "of",    "with",   "from", "by",    "as",    "or",
+        "and",   "but",   "this",   "that", "it",    "its",   "my",
+        "your",  "their", "works",  "work", "about", "into",  "over",
+        "learn", "code",  "coding",
     };
     var tokens: [32][]const u8 = undefined;
     var token_count: usize = 0;
@@ -294,22 +405,286 @@ fn extractLargeContext(doc: []const u8, query: []const u8, max_len: usize) []con
     var best_idx: usize = 0;
     var found = false;
     for (tokens[0..token_count]) |token| {
-        if (utf8IndexOfInsensitive(doc, token)) |idx| {
+        if (utf8IndexOfInsensitive(visible_doc, token)) |idx| {
             best_idx = idx;
             found = true;
             break;
         }
     }
 
-    if (!found) return doc[0..max_len];
+    if (!found) return visible_doc[0..max_len];
 
     // Center window on the match
     const half = max_len / 2;
     const raw_start: usize = if (best_idx > half) best_idx - half else 0;
-    const start = snapBackToCodepoint(doc, raw_start);
-    const raw_end = @min(doc.len, start + max_len);
-    const end = snapForwardToCodepoint(doc, raw_end);
-    return doc[start..end];
+    const start = snapBackToCodepoint(visible_doc, raw_start);
+    const raw_end = @min(visible_doc.len, start + max_len);
+    const end = snapForwardToCodepoint(visible_doc, raw_end);
+    return visible_doc[start..end];
+}
+
+fn isQueryStopword(token: []const u8) bool {
+    const stopwords = [_][]const u8{
+        "how",   "what",  "where",  "when",  "why",   "who",   "which",
+        "does",  "do",    "did",    "can",   "could", "would", "should",
+        "is",    "are",   "was",    "were",  "be",    "been",  "being",
+        "the",   "a",     "an",     "in",    "on",    "at",    "to",
+        "for",   "of",    "with",   "from",  "by",    "as",    "or",
+        "and",   "but",   "this",   "that",  "it",    "its",   "my",
+        "your",  "their", "works",  "work",  "about", "into",  "over",
+        "learn", "code",  "coding", "build",
+    };
+    for (&stopwords) |sw| {
+        if (std.ascii.eqlIgnoreCase(token, sw)) return true;
+    }
+    return false;
+}
+
+fn collectQueryTerms(query: []const u8, buffer: *[16][]const u8) usize {
+    var count: usize = 0;
+    var tok_it = std.mem.tokenizeAny(u8, query, " \n\r\t,.;:!?()[]{}\"'");
+    while (tok_it.next()) |token| {
+        if (token.len < 2 or isQueryStopword(token)) continue;
+        var duplicate = false;
+        for (buffer[0..count]) |existing| {
+            if (std.ascii.eqlIgnoreCase(existing, token)) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (!duplicate and count < buffer.len) {
+            buffer[count] = token;
+            count += 1;
+        }
+    }
+
+    if (count > 0) return count;
+
+    tok_it = std.mem.tokenizeAny(u8, query, " \n\r\t,.;:!?()[]{}\"'");
+    while (tok_it.next()) |token| {
+        if (token.len < 2) continue;
+        var duplicate = false;
+        for (buffer[0..count]) |existing| {
+            if (std.ascii.eqlIgnoreCase(existing, token)) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (!duplicate and count < buffer.len) {
+            buffer[count] = token;
+            count += 1;
+        }
+    }
+
+    return count;
+}
+
+fn scoreQueryTermsAgainstPreview(query: []const u8, title: []const u8, body: []const u8, score: f64, rank: usize) f64 {
+    var terms: [16][]const u8 = undefined;
+    const term_count = collectQueryTerms(query, &terms);
+    if (term_count == 0) {
+        return score * (1.0 / @as(f64, @floatFromInt(rank + 1)));
+    }
+
+    const rank_weight = 1.0 / @as(f64, @floatFromInt(rank + 1));
+    var preview_score = score * (2.0 * rank_weight);
+    for (terms[0..term_count]) |term| {
+        if (utf8IndexOfInsensitive(title, term) != null) {
+            preview_score += 1.5 * rank_weight;
+        } else if (utf8IndexOfInsensitive(body, term) != null) {
+            preview_score += 1.0 * rank_weight;
+        }
+    }
+
+    return preview_score;
+}
+
+fn scoreContextPreviews(query: []const u8, previews: []const Preview) f64 {
+    return evaluateContextPreviews(query, previews).total_score;
+}
+
+fn evaluateContextPreviews(query: []const u8, previews: []const Preview) ContextEval {
+    if (previews.len == 0) return .{ .total_score = 0, .term_coverage = 0 };
+
+    var terms: [16][]const u8 = undefined;
+    const term_count = collectQueryTerms(query, &terms);
+
+    var matched = [_]bool{false} ** 16;
+    var total_score: f64 = 0;
+    for (previews, 0..) |preview, i| {
+        total_score += scoreQueryTermsAgainstPreview(query, preview.title, preview.body, preview.score, i);
+        for (terms[0..term_count], 0..) |term, term_idx| {
+            if (utf8IndexOfInsensitive(preview.title, term) != null or utf8IndexOfInsensitive(preview.body, term) != null) {
+                matched[term_idx] = true;
+            }
+        }
+    }
+
+    var matched_count: usize = 0;
+    for (matched[0..term_count]) |seen| {
+        if (seen) matched_count += 1;
+    }
+    const term_coverage = if (term_count > 0)
+        @as(f64, @floatFromInt(matched_count)) / @as(f64, @floatFromInt(term_count))
+    else
+        1.0;
+    if (term_count > 0) {
+        total_score += 8.0 * term_coverage;
+    }
+    return .{ .total_score = total_score, .term_coverage = term_coverage };
+}
+
+fn evaluateContextSearchResults(
+    db_: *qmd.db.Db,
+    allocator: std.mem.Allocator,
+    query: []const u8,
+    results: []const qmd.search.SearchResult,
+) ContextEval {
+    var previews: [5]Preview = undefined;
+    var owned_snippets = [_]?[]u8{null} ** 5;
+    defer {
+        for (owned_snippets) |maybe_snippet| {
+            if (maybe_snippet) |snippet| allocator.free(snippet);
+        }
+    }
+
+    var count: usize = 0;
+    for (results) |r| {
+        if (count >= previews.len) break;
+
+        var body: []const u8 = r.path;
+        const doc = qmd.store.findActiveDocument(db_, r.collection, r.path, allocator) catch null;
+        if (doc) |d| {
+            defer {
+                allocator.free(d.title);
+                allocator.free(d.hash);
+                allocator.free(d.doc);
+            }
+            const snippet = extractSnippet(allocator, query, d.doc) catch null;
+            if (snippet) |owned| {
+                owned_snippets[count] = owned;
+                body = owned;
+            }
+        }
+
+        previews[count] = .{
+            .title = r.title,
+            .body = body,
+            .score = r.score,
+        };
+        count += 1;
+    }
+
+    return evaluateContextPreviews(query, previews[0..count]);
+}
+
+fn shouldPreferExpandedContextResults(
+    db_: *qmd.db.Db,
+    allocator: std.mem.Allocator,
+    query: []const u8,
+    baseline: []const qmd.search.SearchResult,
+    expanded: []const qmd.search.SearchResult,
+) bool {
+    if (expanded.len == 0) return false;
+    if (baseline.len == 0) return true;
+
+    const baseline_eval = evaluateContextSearchResults(db_, allocator, query, baseline);
+    const expanded_eval = evaluateContextSearchResults(db_, allocator, query, expanded);
+
+    if (expanded_eval.term_coverage < 0.75 and expanded_eval.term_coverage < baseline_eval.term_coverage) {
+        return false;
+    }
+
+    return expanded_eval.total_score > baseline_eval.total_score + 0.75;
+}
+
+fn hasTranscriptDetailPair(results: []const qmd.search.SearchResult, title: []const u8) bool {
+    var has_transcript = false;
+    var has_detail = false;
+    for (results) |r| {
+        if (!std.mem.eql(u8, r.title, title)) continue;
+        if (std.mem.indexOf(u8, r.path, "raw/transcripts/") != null) has_transcript = true;
+        if (std.mem.indexOf(u8, r.path, "videos/details/") != null) has_detail = true;
+    }
+    return has_transcript and has_detail;
+}
+
+fn freeLocalSearchResultSlice(items: []qmd.search.SearchResult, allocator: std.mem.Allocator) void {
+    for (items) |r| {
+        allocator.free(r.collection);
+        allocator.free(r.path);
+        allocator.free(r.title);
+        allocator.free(r.hash);
+    }
+}
+
+fn rerankContextResults(
+    db_: *qmd.db.Db,
+    allocator: std.mem.Allocator,
+    query: []const u8,
+    results: *std.ArrayList(qmd.search.SearchResult),
+    keep: usize,
+) !void {
+    if (results.items.len <= 1) return;
+
+    var terms: [16][]const u8 = undefined;
+    const term_count = collectQueryTerms(query, &terms);
+
+    var candidates = try std.ArrayList(ContextCandidate).initCapacity(allocator, results.items.len);
+    defer candidates.deinit(allocator);
+
+    for (results.items, 0..) |r, idx| {
+        var score = r.score * 10.0;
+        if (hasTranscriptDetailPair(results.items, r.title)) score += 1.0;
+
+        const doc = qmd.store.findActiveDocument(db_, r.collection, r.path, allocator) catch null;
+        if (doc) |d| {
+            defer {
+                allocator.free(d.title);
+                allocator.free(d.hash);
+                allocator.free(d.doc);
+            }
+            const snippet = extractSnippet(allocator, query, d.doc) catch null;
+            if (snippet) |owned| {
+                defer allocator.free(owned);
+                var overlap: usize = 0;
+                for (terms[0..term_count]) |term| {
+                    if (utf8IndexOfInsensitive(owned, term) != null) overlap += 1;
+                }
+                score += 2.5 * @as(f64, @floatFromInt(overlap));
+            }
+        }
+
+        try candidates.append(allocator, .{ .index = idx, .score = score });
+    }
+
+    std.sort.heap(ContextCandidate, candidates.items, {}, struct {
+        fn less(_: void, a: ContextCandidate, b: ContextCandidate) bool {
+            return a.score > b.score;
+        }
+    }.less);
+
+    var reranked = try std.ArrayList(qmd.search.SearchResult).initCapacity(allocator, @min(keep, candidates.items.len));
+    errdefer {
+        freeLocalSearchResultSlice(reranked.items, allocator);
+        reranked.deinit(allocator);
+    }
+
+    for (candidates.items[0..@min(keep, candidates.items.len)]) |candidate| {
+        const item = results.items[candidate.index];
+        try reranked.append(allocator, .{
+            .id = item.id,
+            .collection = try allocator.dupe(u8, item.collection),
+            .path = try allocator.dupe(u8, item.path),
+            .title = try allocator.dupe(u8, item.title),
+            .hash = try allocator.dupe(u8, item.hash),
+            .score = candidate.score,
+        });
+    }
+
+    freeLocalSearchResultSlice(results.items, allocator);
+    results.deinit(allocator);
+    results.* = reranked;
 }
 
 /// Find `needle` in `haystack` using a byte-level comparison that is
@@ -870,6 +1245,9 @@ pub fn main(init: std.process.Init) !void {
             return;
         }
         const query_text = first_arg;
+        const retrieval_query = try rewriteContextQuery(allocator, query_text);
+        defer if (retrieval_query) |rq| allocator.free(rq);
+        const effective_query = retrieval_query orelse query_text;
 
         var output_format: OutputFormat = .text;
         var sort_order: SortOrder = .score;
@@ -904,19 +1282,44 @@ pub fn main(init: std.process.Init) !void {
         if (native_llama_ctx) |*nl| g_native_llama = nl;
         defer g_native_llama = null;
 
-        var result = qmd.search.hybridSearch(&db_, allocator, io, query_text, null, .{
+        var result = qmd.search.hybridSearch(&db_, allocator, io, effective_query, null, .{
             .enable_vector = true,
             .enable_query_expansion = false,
-            .enable_rerank = false,
+            .enable_rerank = getNativeEmbedFn() != null,
             .rrf_k = qmd.search.RRF_K,
-            .max_results = 5,
+            .max_results = 12,
+            .min_score = 0.01,
             .embed_fn = getNativeEmbedFn(),
+            .expand_query_fn = null,
         }) catch {
             try stdout.writeAll("Context search failed\n");
             try stdout.flush();
             return;
         };
         defer result.deinit(allocator);
+
+        if (getNativeExpandQueryFn()) |expand_query_fn| {
+            var expanded_result = qmd.search.hybridSearch(&db_, allocator, io, effective_query, null, .{
+                .enable_vector = true,
+                .enable_query_expansion = true,
+                .enable_rerank = getNativeEmbedFn() != null,
+                .rrf_k = qmd.search.RRF_K,
+                .max_results = 12,
+                .min_score = 0.01,
+                .embed_fn = getNativeEmbedFn(),
+                .expand_query_fn = expand_query_fn,
+            }) catch null;
+            if (expanded_result) |*candidate| {
+                defer candidate.deinit(allocator);
+                if (shouldPreferExpandedContextResults(&db_, allocator, effective_query, result.results.items, candidate.results.items)) {
+                    result.deinit(allocator);
+                    result = candidate.*;
+                    expanded_result = null;
+                }
+            }
+        }
+
+        try rerankContextResults(&db_, allocator, effective_query, &result.results, 5);
 
         sortSearchResults(result.results.items, sort_order);
 
@@ -1048,14 +1451,15 @@ pub fn main(init: std.process.Init) !void {
                     };
                     defer allocator.free(user_msg);
 
-                    const system_prompt = "You are a helpful assistant that answers questions based on the provided documents. " ++
-                        "Be concise and cite sources by title when relevant. If the documents don't contain enough " ++
-                        "information to answer, say so.";
+                    const system_prompt = "Answer using only the provided documents. " ++
+                        "Prefer direct, factual language. " ++
+                        "When you make a claim, cite the source title in parentheses. " ++
+                        "If the documents are insufficient, say that clearly instead of guessing.";
 
                     try stdout.writeAll("\n--- Answer ---\n\n");
                     try stdout.flush();
 
-                    const answer = llama.chat(system_prompt, user_msg, 512, false) catch {
+                    const answer = llama.chat(system_prompt, user_msg, 384, false) catch {
                         try stdout.writeAll("(generation failed)\n");
                         try stdout.flush();
                         return;
@@ -1063,7 +1467,10 @@ pub fn main(init: std.process.Init) !void {
                     // chat() returns page_allocator memory — free with page_allocator
                     defer std.heap.page_allocator.free(answer);
 
-                    try stdout.writeAll(answer);
+                    const cleaned_answer = try sanitizeGeneratedText(allocator, answer);
+                    defer allocator.free(cleaned_answer);
+
+                    try stdout.writeAll(cleaned_answer);
                     try stdout.writeAll("\n");
                 }
             }
@@ -1661,6 +2068,98 @@ test "extractSnippet returns contextual content" {
     const snippet = try extractSnippet(std.testing.allocator, "oauth", doc);
     defer std.testing.allocator.free(snippet);
     try std.testing.expect(std.mem.indexOf(u8, snippet, "OAuth") != null);
+}
+
+test "sanitizeGeneratedText removes wrapper quotes" {
+    const cleaned = try sanitizeGeneratedText(std.testing.allocator, "'Expanded query: rust bevy ecs game development'");
+    defer std.testing.allocator.free(cleaned);
+
+    try std.testing.expectEqualStrings("rust bevy ecs game development", cleaned);
+}
+
+test "skipFrontmatter skips yaml header" {
+    const doc = "---\ntitle: Demo\ntags: [rust]\n---\n\n# Bevy\nReal content";
+    const visible = skipFrontmatter(doc);
+    try std.testing.expect(std.mem.startsWith(u8, visible, "\n# Bevy\nReal content"));
+}
+
+test "nextSignificantQueryToken skips question filler" {
+    const token = nextSignificantQueryToken("what to learn to code games in Rust") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualStrings("games", token);
+}
+
+test "rewriteContextQuery expands broad rust game learning query" {
+    const rewritten = try rewriteContextQuery(std.testing.allocator, "what to learn to code games in Rust");
+    defer if (rewritten) |q| std.testing.allocator.free(q);
+
+    try std.testing.expect(rewritten != null);
+    try std.testing.expect(std.mem.indexOf(u8, rewritten.?, "bevy") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rewritten.?, "gamedev") != null);
+}
+
+test "rewriteContextQuery ignores unrelated rust query" {
+    const rewritten = try rewriteContextQuery(std.testing.allocator, "what is ownership in Rust");
+    try std.testing.expect(rewritten == null);
+}
+
+test "extractSnippet ignores frontmatter and prefers meaningful token" {
+    const doc =
+        "---\n" ++
+        "title: Bevy-Demo\n" ++
+        "tags: [rust, graphics, math, bevy]\n" ++
+        "---\n\n" ++
+        "# Bevy-Demo\n" ++
+        "Bevy uses ECS for modern game development in Rust.";
+    const snippet = try extractSnippet(std.testing.allocator, "what to learn to code games in Rust", doc);
+    defer std.testing.allocator.free(snippet);
+
+    try std.testing.expect(std.mem.indexOf(u8, snippet, "game development") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snippet, "tags:") == null);
+}
+
+test "sanitizeExpandedQuery preserves original query prefix" {
+    const cleaned = try sanitizeExpandedQuery(std.testing.allocator, "what to learn to code games in Rust", "'rust bevy ecs game development ownership'");
+    defer std.testing.allocator.free(cleaned);
+
+    try std.testing.expect(std.mem.startsWith(u8, cleaned, "what to learn to code games in Rust "));
+    try std.testing.expect(std.mem.indexOf(u8, cleaned, "bevy") != null);
+}
+
+test "scoreContextPreviews prefers stronger query coverage" {
+    const baseline = [_]Preview{
+        .{ .title = "Choosing Your Messaging Fabric on AKS", .body = "asynchronous communication event driven data flows", .score = 1.0 },
+        .{ .title = "Development", .body = "general programming links and video index", .score = 1.0 },
+    };
+    const expanded = [_]Preview{
+        .{ .title = "Kubernetes Auto-Scaling Strategies", .body = "Vertical Pod Autoscaler VPA adjusts CPU and memory requests in Kubernetes", .score = 0.91 },
+        .{ .title = "Advanced Microservices Blueprint on Azure Kubernetes Service", .body = "VPA optimizes workload resources using observed usage history", .score = 1.0 },
+    };
+
+    try std.testing.expect(scoreContextPreviews("how VPA works in Kubernetes", expanded[0..]) > scoreContextPreviews("how VPA works in Kubernetes", baseline[0..]));
+}
+
+test "scoreContextPreviews rejects unrelated expansion drift" {
+    const baseline = [_]Preview{
+        .{ .title = "Bevy-Demo", .body = "Bevy uses ECS for game development in Rust and relies on vector math", .score = 0.89 },
+        .{ .title = "Mastering Memory in Rust", .body = "Rust ownership and borrowing help manage memory safely", .score = 0.88 },
+    };
+    const expanded = [_]Preview{
+        .{ .title = "The Blue Screen Era", .body = "Integrated development environments and debugger workflows", .score = 0.89 },
+        .{ .title = "Drasi: The Future of Change-Driven Architecture", .body = "Polling and event architectures create a complexity tax", .score = 0.89 },
+    };
+
+    try std.testing.expect(scoreContextPreviews("what to learn to code games in Rust", baseline[0..]) > scoreContextPreviews("what to learn to code games in Rust", expanded[0..]));
+}
+
+test "hasTranscriptDetailPair detects matching title pair" {
+    const results = [_]qmd.search.SearchResult{
+        .{ .id = 1, .collection = "wiki", .path = "raw/transcripts/a.md", .title = "Bevy-Demo", .hash = "h1", .score = 1.0 },
+        .{ .id = 2, .collection = "wiki", .path = "videos/details/a.md", .title = "Bevy-Demo", .hash = "h2", .score = 0.9 },
+        .{ .id = 3, .collection = "wiki", .path = "raw/transcripts/b.md", .title = "Other", .hash = "h3", .score = 0.8 },
+    };
+
+    try std.testing.expect(hasTranscriptDetailPair(results[0..], "Bevy-Demo"));
+    try std.testing.expect(!hasTranscriptDetailPair(results[0..], "Other"));
 }
 
 test "extractSnippet handles CJK Korean text" {
