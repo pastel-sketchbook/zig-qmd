@@ -7,203 +7,81 @@ tasks:
 
   build:
     desc: Build the native CLI executable
-    deps:
-      - fmt
-    cmds:
-      - zig build
+    deps: [fmt]
+    cmds: [zig build]
 
   build:llama:
-    desc: Build with native llama.cpp FFI (requires pre-built static libs)
-    deps:
-      - fmt
-    cmds:
-      - zig build -Dllama
+    desc: Build with native llama.cpp FFI
+    deps: [fmt]
+    cmds: [zig build -Dllama]
 
   test:
     desc: Run all tests
-    cmds:
-      - zig build test
+    cmds: [zig build test]
 
   test:llama:
-    desc: Run all tests with native llama.cpp enabled
-    cmds:
-      - zig build test -Dllama
+    desc: Run all tests with native llama.cpp
+    cmds: [zig build test -Dllama]
 
   test:mcp:
-    desc: Run MCP-related tests (unit + protocol)
-    cmds:
-      - zig build test -- --test-filter mcp
+    desc: Run MCP-related tests
+    cmds: [zig build test -- --test-filter mcp]
 
   test:mcp:framed:
-    desc: Run framed MCP transport tests only
-    cmds:
-      - zig build test -- --test-filter framed
+    desc: Run framed MCP transport tests
+    cmds: [zig build test -- --test-filter framed]
 
   fmt:
     desc: Format Zig code
-    cmds:
-      - zig fmt .
+    cmds: [zig fmt .]
 
   run:
     desc: Build and run the CLI
-    cmds:
-      - zig build run -- {{.CLI_ARGS}}
+    cmds: ["zig build run -- {{.CLI_ARGS}}"]
 
   check:
-    desc: Check format without modifying files and run tests
+    desc: Check format and run tests
     cmds:
       - zig fmt --check .
       - zig build test
 
   check:mcp:
-    desc: Check format and run MCP protocol tests
+    desc: Check format and run MCP tests
     cmds:
       - zig fmt --check .
       - zig build test -- --test-filter mcp
 
   e2e:
-    desc: Run end-to-end test with fresh database and test files
-    deps:
-      - build
-    cmds:
-      - |
-        set -e
-        rm -rf .qmd /tmp/qmd-test
-        mkdir -p .qmd /tmp/qmd-test/notes
-        
-        # Create test markdown files
-        printf '# Auth Guide\n\nAuthentication details here.\n' > /tmp/qmd-test/notes/auth.md
-        printf '# Test Doc\n\nThis is about authentication flow.\n' > /tmp/qmd-test/notes/test.md
-        
-        # Initialize and index
-        ./zig-out/bin/zmd update
-        ./zig-out/bin/zmd collection add notes /tmp/qmd-test/notes
-        ./zig-out/bin/zmd update
-        
-        # Test all search modes
-        echo ""
-        echo "=== FTS Search ==="
-        ./zig-out/bin/zmd search auth
-        echo ""
-        echo "=== Vector Search ==="
-        ./zig-out/bin/zmd vsearch auth
-        echo ""
-        echo "=== Hybrid Query ==="
-        ./zig-out/bin/zmd query auth
-        echo ""
-        echo "=== Status ==="
-        ./zig-out/bin/zmd status
-        
-        # Cleanup
-        rm -rf .qmd /tmp/qmd-test
-        echo ""
-        echo "E2E test complete!"
+    desc: E2E test (FTS + FNV fallback)
+    deps: [build]
+    cmds: [./scripts/e2e.sh]
 
   e2e:real:
-    desc: Run end-to-end test using real llama.cpp embedding model (hf://)
-    deps:
-      - build
-    cmds:
-      - ./scripts/e2e-real.sh
+    desc: E2E test with real subprocess embedding model
+    deps: [build]
+    cmds: [./scripts/e2e-real.sh]
 
   e2e:llama:
-    desc: E2E test with native llama.cpp dual models (embed + generation)
-    deps:
-      - build:llama
-    cmds:
-      - |
-        set -e
-        export QMD_EMBED_MODEL="${QMD_EMBED_MODEL:-$HOME/tools/llama/models/nomic-embed-text-v1.5.Q8_0.gguf}"
-        export QMD_MODEL="${QMD_MODEL:-$HOME/tools/llama/models/gemma-4-E2B-it-Q8_0.gguf}"
-        echo "EMBED_MODEL: $QMD_EMBED_MODEL"
-        echo "MODEL:       $QMD_MODEL"
-        DIR=$(mktemp -d)
-        trap "rm -rf $DIR" EXIT
-        mkdir -p "$DIR/notes"
-
-        printf '# Authentication Flow\n\nJWT tokens for session management. OAuth2 with Google or GitHub.\nTokens expire after 24 hours. Refresh tokens rotated on each use.\n' > "$DIR/notes/auth.md"
-        printf '# Deployment Guide\n\nDocker build, push to registry, Helm upgrade on Kubernetes.\nRollback with helm rollback. Prometheus metrics on /metrics.\n' > "$DIR/notes/deploy.md"
-        printf '# Database Schema\n\nUsers table with UUID primary key, email, name.\nSessions table references users. Indexes on email and expires_at.\n' > "$DIR/notes/schema.md"
-
-        cd "$DIR"
-        ZMD={{.ROOT_DIR}}/zig-out/bin/zmd
-
-        echo "=== Init ==="
-        $ZMD update
-        $ZMD collection add notes ./notes
-        $ZMD update
-        $ZMD status
-
-        echo ""
-        echo "=== FTS Search ==="
-        $ZMD search "authentication JWT"
-
-        echo ""
-        echo "=== Embed ==="
-        $ZMD embed "hello world" 2>&1 | grep -E 'Embedding|error'
-
-        echo ""
-        echo "=== Vector Search ==="
-        $ZMD vsearch "how does user login work" 2>&1 | grep -v '^ggml\|^llama\|^print_info\|^load\|^create_tensor\|^sched\|^graph\|^set_abort\|^done_getting\|^\.\.\|^~llama\|^kernel\|^init_token'
-
-        echo ""
-        echo "=== Hybrid Query (dual model) ==="
-        $ZMD query "how to deploy the application" 2>&1 | grep -v '^ggml\|^llama\|^print_info\|^load\|^create_tensor\|^sched\|^graph\|^set_abort\|^done_getting\|^\.\.\|^~llama\|^kernel\|^init_token'
-
-        echo ""
-        echo "=== Context (RAG answer) ==="
-        $ZMD context "how does authentication work" 2>&1 | grep -v '^ggml\|^llama_\|^print_info\|^load\|^create_tensor\|^sched\|^graph\|^set_abort\|^done_getting\|^\.\.\|^~llama\|^kernel\|^init_token\|compiling pipeline\|^loaded kernel'
-
-        echo ""
-        echo "E2E llama test complete!"
+    desc: E2E test with dual GGUF models (embed + generation)
+    deps: [build:llama]
+    cmds: [./scripts/e2e-llama.sh]
 
   e2e:llama:embed-only:
-    desc: E2E test with embed model only (no generation model)
-    deps:
-      - build:llama
-    cmds:
-      - |
-        set -e
-        export QMD_EMBED_MODEL="${QMD_EMBED_MODEL:-$HOME/tools/llama/models/nomic-embed-text-v1.5.Q8_0.gguf}"
-        unset QMD_MODEL
-        echo "EMBED_MODEL: $QMD_EMBED_MODEL"
-        DIR=$(mktemp -d)
-        trap "rm -rf $DIR" EXIT
-        mkdir -p "$DIR/notes"
-
-        printf '# Auth Guide\n\nAuthentication details here.\n' > "$DIR/notes/auth.md"
-        printf '# Deploy Guide\n\nDeployment instructions.\n' > "$DIR/notes/deploy.md"
-
-        cd "$DIR"
-        ZMD={{.ROOT_DIR}}/zig-out/bin/zmd
-
-        $ZMD update
-        $ZMD collection add notes ./notes
-        $ZMD update
-
-        echo "=== Embed ==="
-        $ZMD embed "test embedding" 2>&1 | grep -E 'Embedding|error'
-
-        echo ""
-        echo "=== Vector Search ==="
-        $ZMD vsearch "how to authenticate" 2>&1 | grep -v '^ggml\|^llama\|^print_info\|^load\|^create_tensor\|^sched\|^graph\|^set_abort\|^done_getting\|^\.\.\|^~llama\|^kernel\|^init_token'
-
-        echo ""
-        echo "E2E embed-only test complete!"
+    desc: E2E test with embed model only
+    deps: [build:llama]
+    cmds: [./scripts/e2e-llama-embed-only.sh]
 
   install:
-    desc: Build and copy zmd to ~/bin/
-    deps:
-      - build
+    desc: Build and install zmd to ~/bin/
+    deps: [build]
     cmds:
       - mkdir -p ~/bin
       - cp zig-out/bin/zmd ~/bin/zmd
       - echo "Installed zmd to ~/bin/zmd"
 
   install:llama:
-    desc: Build with native llama.cpp and copy zmd to ~/bin/
-    deps:
-      - build:llama
+    desc: Build with llama and install zmd to ~/bin/
+    deps: [build:llama]
     cmds:
       - mkdir -p ~/bin
       - cp zig-out/bin/zmd ~/bin/zmd
@@ -211,85 +89,44 @@ tasks:
 
   clean:
     desc: Clean build artifacts
-    cmds:
-      - rm -rf .zig-cache zig-out
+    cmds: [rm -rf .zig-cache zig-out]
 
   cross:linux:
-    desc: Cross-compile zmd for linux x86_64
-    cmds:
-      - zig build -Dtarget=x86_64-linux
+    desc: Cross-compile for linux x86_64
+    cmds: [zig build -Dtarget=x86_64-linux]
 
   cross:mac:
-    desc: Cross-compile zmd for macOS aarch64
-    cmds:
-      - zig build -Dtarget=aarch64-macos
+    desc: Cross-compile for macOS aarch64
+    cmds: [zig build -Dtarget=aarch64-macos]
 
   cross:windows:
-    desc: Cross-compile zmd for windows x86_64
-    cmds:
-      - zig build -Dtarget=x86_64-windows
+    desc: Cross-compile for windows x86_64
+    cmds: [zig build -Dtarget=x86_64-windows]
 
   cross:
-    desc: Cross-compile common release targets
+    desc: Cross-compile all release targets
     cmds:
       - task cross:linux
       - task cross:mac
       - task cross:windows
 
   loc:
-    desc: Count lines of code with tokei
-    cmds:
-      - tokei
+    desc: Count lines of code
+    cmds: [tokei]
 
   version:
     desc: Show current version
     silent: true
-    cmds:
-      - cat VERSION
+    cmds: [cat VERSION]
 
   version:patch:
-    desc: Bump patch version (0.1.0 -> 0.1.1) and tag
-    cmds:
-      - task: _version:bump
-        vars:
-          PART: patch
+    desc: Bump patch version
+    cmds: [./scripts/version-bump.sh patch]
 
   version:minor:
-    desc: Bump minor version (0.1.0 -> 0.2.0) and tag
-    cmds:
-      - task: _version:bump
-        vars:
-          PART: minor
+    desc: Bump minor version
+    cmds: [./scripts/version-bump.sh minor]
 
   version:major:
-    desc: Bump major version (0.1.0 -> 1.0.0) and tag
-    cmds:
-      - task: _version:bump
-        vars:
-          PART: major
-
-  _version:bump:
-    internal: true
-    silent: true
-    vars:
-      CURRENT:
-        sh: cat VERSION | tr -d '\n'
-      NEXT:
-        sh: |
-          cur=$(cat VERSION | tr -d '\n')
-          major=${cur%%.*}; rest=${cur#*.}; minor=${rest%%.*}; patch=${rest#*.}
-          case "{{.PART}}" in
-            patch) echo "$major.$minor.$((patch + 1))" ;;
-            minor) echo "$major.$((minor + 1)).0" ;;
-            major) echo "$((major + 1)).0.0" ;;
-          esac
-    preconditions:
-      - sh: git diff --quiet && git diff --cached --quiet
-        msg: "Working tree must be clean before bumping version"
-    cmds:
-      - cmd: printf '%s\n' '{{.NEXT}}' > VERSION
-      - cmd: perl -pi -e 's/\.version = "{{.CURRENT}}"/.version = "{{.NEXT}}"/' build.zig.zon
-      - cmd: git add VERSION build.zig.zon
-      - cmd: git commit -m "chore{{":"}} bump version to {{.NEXT}}"
-      - cmd: git tag "v{{.NEXT}}"
-      - cmd: echo "{{.CURRENT}} → {{.NEXT}} (tagged v{{.NEXT}})"
+    desc: Bump major version
+    cmds: [./scripts/version-bump.sh major]
