@@ -200,6 +200,15 @@ tasks:
       - cp zig-out/bin/zmd ~/bin/zmd
       - echo "Installed zmd to ~/bin/zmd"
 
+  install:llama:
+    desc: Build with native llama.cpp and copy zmd to ~/bin/
+    deps:
+      - build:llama
+    cmds:
+      - mkdir -p ~/bin
+      - cp zig-out/bin/zmd ~/bin/zmd
+      - echo "Installed zmd (llama) to ~/bin/zmd"
+
   clean:
     desc: Clean build artifacts
     cmds:
