@@ -367,24 +367,29 @@ pub fn hybridSearch(
     for (fused[0..@min(fused.len, options.max_results)]) |r| {
         var title = r.title;
         var hash = r.hash;
+        var doc_to_free: ?store.ActiveDocument = null;
         if (std.mem.eql(u8, title, "")) {
-            const doc = store.findActiveDocument(db_, r.collection, r.path, allocator) catch continue;
-            defer {
-                allocator.free(doc.title);
-                allocator.free(doc.hash);
-                allocator.free(doc.doc);
+            const doc = store.findActiveDocument(db_, r.collection, r.path, allocator) catch null;
+            if (doc) |d| {
+                title = d.title;
+                hash = d.hash;
+                doc_to_free = d;
             }
-            title = doc.title;
-            hash = doc.hash;
         }
-        try final_results.append(allocator, .{
+        const result_entry = SearchResult{
             .id = r.id,
             .collection = try allocator.dupe(u8, r.collection),
             .path = try allocator.dupe(u8, r.path),
             .title = try allocator.dupe(u8, title),
             .hash = try allocator.dupe(u8, hash),
             .score = r.score,
-        });
+        };
+        if (doc_to_free) |d| {
+            allocator.free(d.title);
+            allocator.free(d.hash);
+            allocator.free(d.doc);
+        }
+        try final_results.append(allocator, result_entry);
     }
 
     return .{ .results = final_results, .fts_count = fts_scored.items.len, .vec_count = vec_scored.len };
@@ -438,32 +443,36 @@ fn rerankByEmbedding(db_: *db.Db, allocator: std.mem.Allocator, io: std.Io, quer
     var rescored = try allocator.alloc(ScoredResult, results.len);
     errdefer allocator.free(rescored);
     for (results, 0..) |r, i| {
-        var source_text = r.title;
+        var source_text: []const u8 = r.title;
+        var doc_to_free: ?store.ActiveDocument = null;
         const doc = store.findActiveDocument(db_, r.collection, r.path, allocator) catch null;
         if (doc) |d| {
-            defer {
-                allocator.free(d.title);
-                allocator.free(d.hash);
-                allocator.free(d.doc);
-            }
             source_text = d.doc;
+            doc_to_free = d;
         }
 
         const passage_copy = try allocator.dupe(u8, source_text);
+
+        // Free the document after we've duped the text we need
+        if (doc_to_free) |d| {
+            allocator.free(d.title);
+            allocator.free(d.hash);
+            allocator.free(d.doc);
+        }
         owned_passages[i] = passage_copy;
         passages[i] = passage_copy;
 
         const d_emb = if (embed_fn) |f|
-            (f(allocator, source_text, false) catch q_emb)
+            (f(allocator, passage_copy, false) catch q_emb)
         else
-            (embed_text(allocator, source_text, false) catch q_emb);
+            (embed_text(allocator, passage_copy, false) catch q_emb);
         defer if (d_emb.ptr != q_emb.ptr) allocator.free(d_emb);
 
         const cosine = llm.cosineSimilarity(q_emb, d_emb);
         const dense_score = @max(@as(f32, 0), (cosine + 1.0) * 0.5); // normalize [-1,1] -> [0,1]
         base_scores[i] = dense_score;
 
-        var item = r;
+        var item = try cloneScoredResult(allocator, r);
         item.score = dense_score;
         rescored[i] = item;
     }

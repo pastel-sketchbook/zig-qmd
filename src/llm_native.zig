@@ -127,8 +127,8 @@ pub const NativeLlama = struct {
     /// The caller owns the returned slice.
     pub fn generate(self: *NativeLlama, prompt: []const u8, max_tokens: u32) NativeLlamaError![]u8 {
         var cparams = c.llama_context_default_params();
-        cparams.n_batch = 2048;
-        cparams.n_ubatch = 2048;
+        cparams.n_batch = 4096;
+        cparams.n_ubatch = 4096;
         cparams.n_ctx = 4096;
 
         const ctx = c.llama_init_from_model(self.model, cparams) orelse

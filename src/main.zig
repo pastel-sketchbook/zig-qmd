@@ -229,6 +229,89 @@ fn extractSnippet(allocator: std.mem.Allocator, query: []const u8, doc: []const 
     return out.toOwnedSlice(allocator);
 }
 
+/// Extracts a large context window centered on query term matches.
+/// Returns a slice of the original doc (no allocation needed).
+/// Searches for each query token (longest first for specificity) and
+/// centers a window of `max_len` chars around the best match.
+/// Falls back to the start of the document.
+fn extractLargeContext(doc: []const u8, query: []const u8, max_len: usize) []const u8 {
+    if (doc.len <= max_len) return doc;
+
+    // Collect tokens, skip stopwords, then search longest-first for better specificity
+    const stopwords = [_][]const u8{
+        "how",  "what",  "where", "when", "why",   "who",   "which",
+        "does", "do",    "did",   "can",  "could", "would", "should",
+        "is",   "are",   "was",   "were", "be",    "been",  "being",
+        "the",  "a",     "an",    "in",   "on",    "at",    "to",
+        "for",  "of",    "with",  "from", "by",    "as",    "or",
+        "and",  "but",   "this",  "that", "it",    "its",   "my",
+        "your", "their", "works", "work", "about", "into",  "over",
+    };
+    var tokens: [32][]const u8 = undefined;
+    var token_count: usize = 0;
+    var tok_it = std.mem.tokenizeScalar(u8, query, ' ');
+    while (tok_it.next()) |token| {
+        if (token.len < 2) continue;
+        // Skip stopwords
+        var is_stop = false;
+        for (&stopwords) |sw| {
+            if (std.ascii.eqlIgnoreCase(token, sw)) {
+                is_stop = true;
+                break;
+            }
+        }
+        if (is_stop) continue;
+        if (token_count < tokens.len) {
+            tokens[token_count] = token;
+            token_count += 1;
+        }
+    }
+
+    // If all tokens were stopwords, fall back to all non-tiny tokens
+    if (token_count == 0) {
+        tok_it = std.mem.tokenizeScalar(u8, query, ' ');
+        while (tok_it.next()) |token| {
+            if (token.len < 2) continue;
+            if (token_count < tokens.len) {
+                tokens[token_count] = token;
+                token_count += 1;
+            }
+        }
+    }
+
+    // Sort by length ascending — shorter non-stopword tokens tend to be
+    // more specific (e.g. "VPA" is rarer than "Kubernetes")
+    for (1..token_count) |i| {
+        const key = tokens[i];
+        var j: usize = i;
+        while (j > 0 and tokens[j - 1].len > key.len) {
+            tokens[j] = tokens[j - 1];
+            j -= 1;
+        }
+        tokens[j] = key;
+    }
+
+    var best_idx: usize = 0;
+    var found = false;
+    for (tokens[0..token_count]) |token| {
+        if (utf8IndexOfInsensitive(doc, token)) |idx| {
+            best_idx = idx;
+            found = true;
+            break;
+        }
+    }
+
+    if (!found) return doc[0..max_len];
+
+    // Center window on the match
+    const half = max_len / 2;
+    const raw_start: usize = if (best_idx > half) best_idx - half else 0;
+    const start = snapBackToCodepoint(doc, raw_start);
+    const raw_end = @min(doc.len, start + max_len);
+    const end = snapForwardToCodepoint(doc, raw_end);
+    return doc[start..end];
+}
+
 /// Find `needle` in `haystack` using a byte-level comparison that is
 /// case-insensitive for ASCII while leaving non-ASCII bytes (CJK, Hangul,
 /// etc.) compared exactly.  Returns the byte offset of the first match.
@@ -823,6 +906,9 @@ pub fn main(init: std.process.Init) !void {
 
         var result = qmd.search.hybridSearch(&db_, allocator, io, query_text, null, .{
             .enable_vector = true,
+            .enable_query_expansion = false,
+            .enable_rerank = false,
+            .rrf_k = qmd.search.RRF_K,
             .max_results = 5,
             .embed_fn = getNativeEmbedFn(),
         }) catch {
@@ -935,8 +1021,12 @@ pub fn main(init: std.process.Init) !void {
                         allocator.free(doc.hash);
                         allocator.free(doc.doc);
                     }
-                    const snippet = extractSnippet(allocator, query_text, doc.doc) catch continue;
-                    defer allocator.free(snippet);
+
+                    // Extract a large context window around query terms.
+                    // This finds where the query matches in the doc and grabs
+                    // up to max_context_len chars centered on that location.
+                    const max_context_len: usize = 1500;
+                    const doc_content = extractLargeContext(doc.doc, query_text, max_context_len);
 
                     context_buf.appendSlice(allocator, "---\n") catch continue;
                     context_buf.appendSlice(allocator, "Source: ") catch continue;
@@ -944,7 +1034,8 @@ pub fn main(init: std.process.Init) !void {
                     context_buf.appendSlice(allocator, " (") catch continue;
                     context_buf.appendSlice(allocator, r.path) catch continue;
                     context_buf.appendSlice(allocator, ")\n") catch continue;
-                    context_buf.appendSlice(allocator, snippet) catch continue;
+                    context_buf.appendSlice(allocator, doc_content) catch continue;
+                    if (doc_content.len < doc.doc.len) context_buf.appendSlice(allocator, "...") catch {};
                     context_buf.appendSlice(allocator, "\n") catch continue;
                 }
 
