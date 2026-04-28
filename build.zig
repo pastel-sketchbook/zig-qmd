@@ -90,6 +90,7 @@ pub fn build(b: *std.Build) void {
     // --- Build options module (compile-time feature flags) ---
     const build_options = b.addOptions();
     build_options.addOption(bool, "enable_llama", enable_llama);
+    build_options.addOption([]const u8, "version", b.option([]const u8, "version", "Override version string") orelse @embedFile("VERSION"));
     const build_options_mod = build_options.createModule();
 
     // --- Library module (SDK) ---

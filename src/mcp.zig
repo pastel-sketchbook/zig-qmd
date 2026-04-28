@@ -3,6 +3,7 @@ const db = @import("db.zig");
 const config = @import("config.zig");
 const search = @import("search.zig");
 const store = @import("store.zig");
+const qmd = @import("root.zig");
 const root = @import("root.zig");
 
 const DB_PATH = ".qmd/data.db";
@@ -301,7 +302,7 @@ pub const McpServer = struct {
     }
 
     fn getServerInfo() []const u8 {
-        return "{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{\"listChanged\":false}},\"serverInfo\":{\"name\":\"zmd\",\"version\":\"0.4.1\"}}";
+        return "{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{\"listChanged\":false}},\"serverInfo\":{\"name\":\"zmd\",\"version\":\"" ++ qmd.version ++ "\"}}";
     }
 
     fn formatResponse(id: []const u8, result: []const u8, allocator: std.mem.Allocator) ![]u8 {
