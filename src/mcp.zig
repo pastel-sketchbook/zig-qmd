@@ -301,7 +301,7 @@ pub const McpServer = struct {
     }
 
     fn getServerInfo() []const u8 {
-        return "{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{\"listChanged\":false}},\"serverInfo\":{\"name\":\"zmd\",\"version\":\"0.3.0\"}}";
+        return "{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{\"listChanged\":false}},\"serverInfo\":{\"name\":\"zmd\",\"version\":\"0.4.1\"}}";
     }
 
     fn formatResponse(id: []const u8, result: []const u8, allocator: std.mem.Allocator) ![]u8 {

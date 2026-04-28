@@ -13,7 +13,7 @@ pub const remote = @import("remote.zig");
 pub const llm_native = if (build_options.enable_llama) @import("llm_native.zig") else struct {};
 
 /// ZMD library version, kept in sync with the VERSION file.
-pub const version = "0.3.0";
+pub const version = "0.4.1";
 
 /// High-level QMD engine providing collection management, indexing, and search.
 pub const Qmd = struct {
