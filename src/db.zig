@@ -4,6 +4,7 @@ const c = @import("c_sqlite");
 /// Errors returned by database operations.
 pub const DbError = error{
     OpenFailed,
+    VecInitFailed,
     ExecFailed,
     PrepareFailed,
     StepFailed,
@@ -25,12 +26,24 @@ pub const Db = struct {
     cache_len: usize = 0,
 
     /// Open (or create) a database at `path`. Use ":memory:" for in-memory.
+    ///
+    /// Registers the `sqlite-vec` extension (`vec0` virtual table type and
+    /// helper functions like `vec_f32`) on the new connection.  Every command
+    /// path — `update`, `query`, `search`, `vsearch`, `context`, etc. — opens
+    /// a fresh connection, so doing this here guarantees that vector queries
+    /// always hit the native fast path instead of silently falling back to a
+    /// full-table JSON cosine scan.
     pub fn open(path: [*:0]const u8) DbError!Db {
         var handle: ?*c.sqlite3 = null;
         const rc = c.sqlite3_open(path, &handle);
         if (rc != c.SQLITE_OK or handle == null) {
             if (handle) |h| _ = c.sqlite3_close(h);
             return DbError.OpenFailed;
+        }
+        const vec_rc = c.sqlite3_vec_init(handle.?, null, null);
+        if (vec_rc != c.SQLITE_OK) {
+            _ = c.sqlite3_close(handle.?);
+            return DbError.VecInitFailed;
         }
         return Db{ .handle = handle.? };
     }
@@ -169,8 +182,8 @@ pub fn initSchema(db: *Db) DbError!void {
     try db.exec("PRAGMA journal_mode = WAL");
     try db.exec("PRAGMA foreign_keys = ON");
 
-    const vec_rc = c.sqlite3_vec_init(db.handle, null, null);
-    if (vec_rc != c.SQLITE_OK) return DbError.ExecFailed;
+    // sqlite-vec is now registered in Db.open() so it is available on every
+    // connection, not only those that go through schema initialization.
 
     // Content-addressable storage
     try db.exec(
