@@ -1007,6 +1007,29 @@ pub fn main(init: std.process.Init) !void {
                     };
                     defer allocator.free(content);
 
+                    var content_hash: [64:0]u8 = undefined;
+                    qmd.store.hashContent(content, &content_hash);
+                    if (qmd.store.findActiveDocumentHash(&db_, col.name, entry.path)) |existing_hash| {
+                        if (std.mem.eql(u8, existing_hash[0..], content_hash[0..64])) {
+                            total_indexed += 1;
+                            col_count += 1;
+                            total_skipped += 1;
+
+                            // Progress reporting every 500 documents
+                            if (col_count % 500 == 0) {
+                                try stdout.print("  ... {d} documents processed\n", .{col_count});
+                                try stdout.flush();
+                            }
+                            continue;
+                        }
+                    } else |err| switch (err) {
+                        error.NotFound => {},
+                        else => {
+                            try stdout.print("    Error checking {s}: {any}\n", .{ entry.path, err });
+                            continue;
+                        },
+                    }
+
                     const insert_result = qmd.store.insertDocument(&db_, col.name, entry.path, content) catch |err| {
                         try stdout.print("    Error inserting {s}: {any}\n", .{ entry.path, err });
                         continue;
@@ -1063,11 +1086,24 @@ pub fn main(init: std.process.Init) !void {
                             };
                         }
                     } else if (embedding_engine) |*engine| {
-                        for (chunk_slices.items, 0..) |chunk, idx| {
+                        var formatted_chunks = std.ArrayList([]const u8).initCapacity(allocator, chunk_slices.items.len) catch continue;
+                        defer {
+                            for (formatted_chunks.items) |formatted| allocator.free(formatted);
+                            formatted_chunks.deinit(allocator);
+                        }
+
+                        for (chunk_slices.items) |chunk| {
                             const formatted = qmd.llm.formatDocForEmbedding(allocator, chunk) catch continue;
-                            defer allocator.free(formatted);
-                            const emb = engine.embed(formatted) catch continue;
-                            defer allocator.free(emb);
+                            try formatted_chunks.append(allocator, formatted);
+                        }
+
+                        const embeddings = engine.embedBatch(formatted_chunks.items) catch continue;
+                        defer {
+                            for (embeddings) |emb| allocator.free(emb);
+                            allocator.free(embeddings);
+                        }
+
+                        for (embeddings, 0..) |emb, idx| {
                             qmd.store.upsertContentVectorAt(&db_, doc_hash[0..], @intCast(idx), 0, engine.model_path, emb, allocator) catch |err| {
                                 if (err == error.OutOfMemory) return err;
                                 continue;
