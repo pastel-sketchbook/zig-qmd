@@ -941,7 +941,8 @@ pub fn main(init: std.process.Init) !void {
         if (native_llama) |*nl| g_native_llama = nl;
         defer g_native_llama = null;
 
-        var embedding_engine: ?qmd.llm.LlamaEmbedding = if (getNativeEmbedFn() == null)
+        const native_embed_fn = getNativeEmbedFn();
+        var embedding_engine: ?qmd.llm.LlamaEmbedding = if (native_embed_fn == null)
             make_embedding_engine(allocator, io, init.environ_map)
         else
             null;
@@ -998,6 +999,37 @@ pub fn main(init: std.process.Init) !void {
 
             while (try walker.next(io)) |entry| {
                 if (entry.kind == .file and std.mem.endsWith(u8, entry.path, ".md")) {
+                    const file_stat = dir.statFile(io, entry.path, .{}) catch null;
+                    const mtime_ns = if (file_stat) |stat|
+                        std.math.cast(i64, stat.mtime.nanoseconds)
+                    else
+                        null;
+
+                    if (file_stat) |stat| {
+                        if (mtime_ns) |mtime| {
+                            if (qmd.store.findIndexedFileState(&db_, col.name, entry.path)) |state| {
+                                if (state.size == stat.size and state.mtime_ns == mtime) {
+                                    total_indexed += 1;
+                                    col_count += 1;
+                                    total_skipped += 1;
+
+                                    // Progress reporting every 500 documents
+                                    if (col_count % 500 == 0) {
+                                        try stdout.print("  ... {d} documents processed\n", .{col_count});
+                                        try stdout.flush();
+                                    }
+                                    continue;
+                                }
+                            } else |err| switch (err) {
+                                error.NotFound => {},
+                                else => {
+                                    try stdout.print("    Error checking cache for {s}: {any}\n", .{ entry.path, err });
+                                    continue;
+                                },
+                            }
+                        }
+                    }
+
                     var full_path_buf: [1024]u8 = undefined;
                     const full_path = std.fmt.bufPrint(&full_path_buf, "{s}/{s}", .{ resolved_path, entry.path }) catch continue;
 
@@ -1019,6 +1051,13 @@ pub fn main(init: std.process.Init) !void {
                             if (col_count % 500 == 0) {
                                 try stdout.print("  ... {d} documents processed\n", .{col_count});
                                 try stdout.flush();
+                            }
+                            if (file_stat) |stat| {
+                                if (mtime_ns) |mtime| {
+                                    qmd.store.upsertIndexedFileState(&db_, col.name, entry.path, stat.size, mtime, content_hash[0..64]) catch |err| {
+                                        if (err == error.OutOfMemory) return err;
+                                    };
+                                }
                             }
                             continue;
                         }
@@ -1046,6 +1085,13 @@ pub fn main(init: std.process.Init) !void {
                     // Skip chunking and embedding if content is unchanged
                     if (!insert_result.content_changed) {
                         total_skipped += 1;
+                        if (file_stat) |stat| {
+                            if (mtime_ns) |mtime| {
+                                qmd.store.upsertIndexedFileState(&db_, col.name, entry.path, stat.size, mtime, insert_result.hash[0..]) catch |err| {
+                                    if (err == error.OutOfMemory) return err;
+                                };
+                            }
+                        }
                         continue;
                     }
                     col_new += 1;
@@ -1058,7 +1104,7 @@ pub fn main(init: std.process.Init) !void {
 
                     if (std.mem.eql(u8, qmd.ast.detectLanguage(entry.path), "markdown")) {
                         if (ast_chunker) |*chunker| {
-                            if (chunker.chunk(content, 1200)) |chunks| {
+                            if (chunker.chunk(content, qmd.chunker.CHUNK_SIZE_CHARS)) |chunks| {
                                 var ast_chunks = chunks;
                                 defer ast_chunks.deinit(allocator);
                                 try chunk_slices.appendSlice(allocator, ast_chunks.items);
@@ -1074,11 +1120,11 @@ pub fn main(init: std.process.Init) !void {
                         try chunk_slices.appendSlice(allocator, chunks.chunks.items);
                     }
 
-                    if (getNativeEmbedFn() != null) {
+                    if (native_embed_fn) |embed_fn| {
                         for (chunk_slices.items, 0..) |chunk, idx| {
                             const formatted = qmd.llm.formatDocForEmbedding(allocator, chunk) catch continue;
                             defer allocator.free(formatted);
-                            const emb = nativeEmbedFn(allocator, formatted, false) catch continue;
+                            const emb = embed_fn(allocator, formatted, false) catch continue;
                             defer allocator.free(emb);
                             qmd.store.upsertContentVectorAt(&db_, doc_hash[0..], @intCast(idx), 0, "native-llama", emb, allocator) catch |err| {
                                 if (err == error.OutOfMemory) return err;
@@ -1118,6 +1164,14 @@ pub fn main(init: std.process.Init) !void {
                             qmd.store.upsertContentVectorAt(&db_, doc_hash[0..], @intCast(idx), 0, "fallback-fnv", emb, allocator) catch |err| {
                                 if (err == error.OutOfMemory) return err;
                                 continue;
+                            };
+                        }
+                    }
+
+                    if (file_stat) |stat| {
+                        if (mtime_ns) |mtime| {
+                            qmd.store.upsertIndexedFileState(&db_, col.name, entry.path, stat.size, mtime, doc_hash[0..]) catch |err| {
+                                if (err == error.OutOfMemory) return err;
                             };
                         }
                     }

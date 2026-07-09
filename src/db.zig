@@ -138,6 +138,12 @@ pub const Stmt = struct {
         if (rc != c.SQLITE_OK) return DbError.BindFailed;
     }
 
+    /// Bind a 64-bit integer value to parameter at 1-based index.
+    pub fn bindInt64(self: *Stmt, idx: c_int, val: i64) DbError!void {
+        const rc = c.sqlite3_bind_int64(self.handle.?, idx, val);
+        if (rc != c.SQLITE_OK) return DbError.BindFailed;
+    }
+
     /// Step the statement. Returns true if a row is available (SQLITE_ROW),
     /// false if done (SQLITE_DONE).
     pub fn step(self: *Stmt) DbError!bool {
@@ -155,6 +161,11 @@ pub const Stmt = struct {
     /// Get an integer column value (0-based index).
     pub fn columnInt(self: *Stmt, idx: c_int) c_int {
         return c.sqlite3_column_int(self.handle.?, idx);
+    }
+
+    /// Get a 64-bit integer column value (0-based index).
+    pub fn columnInt64(self: *Stmt, idx: c_int) i64 {
+        return c.sqlite3_column_int64(self.handle.?, idx);
     }
 
     /// Get a double column value (0-based index).
@@ -212,6 +223,20 @@ pub fn initSchema(db: *Db) DbError!void {
     try db.exec("CREATE INDEX IF NOT EXISTS idx_documents_collection ON documents(collection, active)");
     try db.exec("CREATE INDEX IF NOT EXISTS idx_documents_hash ON documents(hash)");
     try db.exec("CREATE INDEX IF NOT EXISTS idx_documents_path ON documents(path, active)");
+
+    // Filesystem stat cache used by indexing to skip reading files whose
+    // size and modification timestamp have not changed since the last update.
+    try db.exec(
+        \\CREATE TABLE IF NOT EXISTS index_file_state (
+        \\  collection TEXT NOT NULL,
+        \\  path       TEXT NOT NULL,
+        \\  size       INTEGER NOT NULL,
+        \\  mtime_ns   INTEGER NOT NULL,
+        \\  hash       TEXT NOT NULL,
+        \\  updated_at TEXT NOT NULL,
+        \\  PRIMARY KEY (collection, path)
+        \\)
+    );
 
     // LLM cache
     try db.exec(
@@ -341,6 +366,7 @@ test "initSchema creates all tables" {
     const tables = [_][]const u8{
         "content",
         "documents",
+        "index_file_state",
         "llm_cache",
         "content_vectors",
         "content_vectors_idx",

@@ -73,7 +73,7 @@ pub const Qmd = struct {
                     if (ast.AstChunker.init(self.allocator, "markdown")) |chunker_value| {
                         var ast_chunker = chunker_value;
                         defer ast_chunker.deinit();
-                        if (ast_chunker.chunk(content, 1200)) |chunks| {
+                        if (ast_chunker.chunk(content, chunker.CHUNK_SIZE_CHARS)) |chunks| {
                             var ast_chunks = chunks;
                             defer ast_chunks.deinit(self.allocator);
                             try chunk_slices.appendSlice(self.allocator, ast_chunks.items);

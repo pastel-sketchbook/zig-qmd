@@ -20,6 +20,13 @@ pub const ActiveDocument = struct {
     doc: []const u8,
 };
 
+/// Filesystem metadata captured after a successful index of a markdown file.
+pub const IndexFileState = struct {
+    hash: [SHA256_HEX_LEN]u8,
+    size: u64,
+    mtime_ns: i64,
+};
+
 /// Computes SHA-256 hex digest of content into a fixed-size buffer.
 pub fn hashContent(content: []const u8, out: *[SHA256_HEX_LEN:0]u8) void {
     var hash: [32]u8 = undefined;
@@ -193,6 +200,54 @@ pub fn findActiveDocumentHash(db_: *db.Db, collection: []const u8, path: []const
     var out: [SHA256_HEX_LEN]u8 = undefined;
     std.mem.copyForwards(u8, out[0..], span[0..SHA256_HEX_LEN]);
     return out;
+}
+
+/// Returns the last indexed filesystem state for a collection path.
+pub fn findIndexedFileState(db_: *db.Db, collection: []const u8, path: []const u8) StoreError!IndexFileState {
+    const sql = "SELECT s.hash, s.size, s.mtime_ns FROM index_file_state s JOIN documents d ON d.collection = s.collection AND d.path = s.path AND d.hash = s.hash AND d.active = 1 WHERE s.collection = ? AND s.path = ?";
+    var stmt = try db_.prepareCached(sql);
+    try stmt.bindText(1, collection);
+    try stmt.bindText(2, path);
+
+    if (!try stmt.step()) return StoreError.NotFound;
+    const hsh = stmt.columnText(0) orelse return StoreError.NotFound;
+    const span = std.mem.span(hsh);
+    if (span.len < SHA256_HEX_LEN) return StoreError.NotFound;
+
+    const size_i64 = stmt.columnInt64(1);
+    if (size_i64 < 0) return StoreError.NotFound;
+
+    var out: [SHA256_HEX_LEN]u8 = undefined;
+    std.mem.copyForwards(u8, out[0..], span[0..SHA256_HEX_LEN]);
+
+    return .{
+        .hash = out,
+        .size = @intCast(size_i64),
+        .mtime_ns = stmt.columnInt64(2),
+    };
+}
+
+/// Records the filesystem state of a file after it has been indexed.
+pub fn upsertIndexedFileState(
+    db_: *db.Db,
+    collection: []const u8,
+    path: []const u8,
+    size: u64,
+    mtime_ns: i64,
+    hash: []const u8,
+) StoreError!void {
+    const size_i64 = std.math.cast(i64, size) orelse return StoreError.InsertFailed;
+    const now = "2024-01-01T00:00:00Z";
+    var stmt = try db_.prepareCached(
+        "INSERT OR REPLACE INTO index_file_state (collection, path, size, mtime_ns, hash, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+    );
+    try stmt.bindText(1, collection);
+    try stmt.bindText(2, path);
+    try stmt.bindInt64(3, size_i64);
+    try stmt.bindInt64(4, mtime_ns);
+    try stmt.bindText(5, hash);
+    try stmt.bindText(6, now);
+    _ = try stmt.step();
 }
 
 /// Lists all active document paths and titles within a collection.
@@ -457,6 +512,24 @@ test "insertDocument returns stable 64-byte hash and content_changed flag" {
     // Insert different content — content_changed should be true again
     const result3 = try insertDocument(&db_, "notes", "x.md", "# X\n\nupdated content");
     try std.testing.expect(result3.content_changed);
+}
+
+test "indexed file state stores size mtime and hash" {
+    var db_ = try db.Db.open(":memory:");
+    defer db_.close();
+    try db.initSchema(&db_);
+
+    const doc = try insertDocument(&db_, "notes", "x.md", "# X\n\ncontent");
+    const hash = doc.hash[0..];
+    try upsertIndexedFileState(&db_, "notes", "x.md", 12345678901, 9876543210, hash);
+
+    const state = try findIndexedFileState(&db_, "notes", "x.md");
+    try std.testing.expectEqual(@as(u64, 12345678901), state.size);
+    try std.testing.expectEqual(@as(i64, 9876543210), state.mtime_ns);
+    try std.testing.expectEqualStrings(hash, &state.hash);
+
+    const missing = findIndexedFileState(&db_, "notes", "missing.md");
+    try std.testing.expectError(StoreError.NotFound, missing);
 }
 
 test "getActiveDocumentPaths returns all paths" {
