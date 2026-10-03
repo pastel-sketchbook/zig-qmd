@@ -175,9 +175,8 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_step.dependOn(&run_cmd.step);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    // Arguments after `--` on the `zig build` CLI are forwarded verbatim.
+    run_cmd.addPassthruArgs();
 
     // --- Tests ---
     const mod_tests = b.addTest(.{

@@ -248,7 +248,7 @@ fn runGeneration(allocator: std.mem.Allocator, io: Io, binary_path: []const u8, 
 
     const run_result = std.process.run(allocator, io, .{
         .argv = argv.items,
-        .stdout_limit = @enumFromInt(64 * 1024),
+        .stdout_limit = @fromBackingInt(@intCast(64 * 1024)),
     }) catch return error.SpawnFailed;
     defer allocator.free(run_result.stderr);
     defer allocator.free(run_result.stdout);
@@ -554,7 +554,7 @@ pub fn expandQueryWithModel(
 
     const run_result = std.process.run(allocator, io, .{
         .argv = argv.items,
-        .stdout_limit = @enumFromInt(16 * 1024),
+        .stdout_limit = @fromBackingInt(@intCast(16 * 1024)),
     }) catch return expandQueryHeuristic(allocator, query);
     defer allocator.free(run_result.stdout);
     defer allocator.free(run_result.stderr);
@@ -820,7 +820,7 @@ pub const LlamaEmbedding = struct {
 
         const run_result = std.process.run(self.allocator, self.io, .{
             .argv = argv.items,
-            .stdout_limit = @enumFromInt(10 * 1024 * 1024),
+            .stdout_limit = @fromBackingInt(@intCast(10 * 1024 * 1024)),
         }) catch return EmbeddingError.SpawnFailed;
         defer self.allocator.free(run_result.stdout);
         defer self.allocator.free(run_result.stderr);

@@ -15,6 +15,14 @@ pub const llm_native = if (build_options.enable_llama) @import("llm_native.zig")
 /// ZMD library version, read from the VERSION file at build time.
 pub const version = std.mem.trim(u8, build_options.version, "\n\r ");
 
+test {
+    // Reference every module so their tests are included in the test build.
+    // Without this, `@import` is lazy and a module's test blocks are only
+    // analyzed if something already references one of its declarations,
+    // which silently skips whole files' worth of tests.
+    std.testing.refAllDecls(@This());
+}
+
 /// High-level QMD engine providing collection management, indexing, and search.
 pub const Qmd = struct {
     allocator: std.mem.Allocator,
@@ -56,7 +64,7 @@ pub const Qmd = struct {
 
                 var full_path_buf: [1024]u8 = undefined;
                 const full_path = std.fmt.bufPrint(&full_path_buf, "{s}/{s}", .{ col.path, entry.path }) catch continue;
-                const content = std.Io.Dir.cwd().readFileAlloc(self.io, full_path, self.allocator, @enumFromInt(1024 * 1024)) catch continue;
+                const content = std.Io.Dir.cwd().readFileAlloc(self.io, full_path, self.allocator, @fromBackingInt(@intCast(1024 * 1024))) catch continue;
                 defer self.allocator.free(content);
 
                 const insert_result = store.insertDocument(&self.db_inst, col.name, entry.path, content) catch continue;

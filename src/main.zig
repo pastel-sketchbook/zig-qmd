@@ -510,7 +510,7 @@ fn evaluateContextPreviews(query: []const u8, previews: []const Preview) Context
     var terms: [16][]const u8 = undefined;
     const term_count = collectQueryTerms(query, &terms);
 
-    var matched = [_]bool{false} ** 16;
+    var matched: [16]bool = @splat(false);
     var total_score: f64 = 0;
     for (previews, 0..) |preview, i| {
         total_score += scoreQueryTermsAgainstPreview(query, preview.title, preview.body, preview.score, i);
@@ -542,7 +542,7 @@ fn evaluateContextSearchResults(
     results: []const qmd.search.SearchResult,
 ) ContextEval {
     var previews: [5]Preview = undefined;
-    var owned_snippets = [_]?[]u8{null} ** 5;
+    var owned_snippets: [5]?[]u8 = @splat(null);
     defer {
         for (owned_snippets) |maybe_snippet| {
             if (maybe_snippet) |snippet| allocator.free(snippet);
@@ -807,7 +807,7 @@ pub fn main(init: std.process.Init) !void {
         };
 
         var db_path_buf: [256]u8 = undefined;
-        const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}", .{DB_PATH});
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}", .{DB_PATH}, 0);
         var db_ = qmd.db.Db.open(db_path) catch {
             try stdout.writeAll("Error: Failed to open database. Run 'zmd update' first.\n");
             try stdout.flush();
@@ -897,7 +897,7 @@ pub fn main(init: std.process.Init) !void {
         try stdout.flush();
 
         var db_path_buf: [256]u8 = undefined;
-        const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}", .{DB_PATH});
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}", .{DB_PATH}, 0);
 
         std.Io.Dir.cwd().createDir(io, ".qmd", .default_dir) catch |err| {
             if (err != error.PathAlreadyExists) return err;
@@ -1033,7 +1033,7 @@ pub fn main(init: std.process.Init) !void {
                     var full_path_buf: [1024]u8 = undefined;
                     const full_path = std.fmt.bufPrint(&full_path_buf, "{s}/{s}", .{ resolved_path, entry.path }) catch continue;
 
-                    const content = std.Io.Dir.cwd().readFileAlloc(io, full_path, allocator, @enumFromInt(1024 * 1024)) catch |err| {
+                    const content = std.Io.Dir.cwd().readFileAlloc(io, full_path, allocator, @fromBackingInt(@intCast(1024 * 1024))) catch |err| {
                         try stdout.print("    Error reading {s}: {any}\n", .{ entry.path, err });
                         continue;
                     };
@@ -1232,7 +1232,7 @@ pub fn main(init: std.process.Init) !void {
         }
 
         var db_path_buf: [256]u8 = undefined;
-        const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}", .{DB_PATH});
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}", .{DB_PATH}, 0);
         var db_ = qmd.db.Db.open(db_path) catch {
             try stdout.writeAll("Error: Database not found. Run 'zmd update' first.\n");
             try stdout.flush();
@@ -1354,7 +1354,7 @@ pub fn main(init: std.process.Init) !void {
         }
 
         var db_path_buf: [256]u8 = undefined;
-        const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}", .{DB_PATH});
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}", .{DB_PATH}, 0);
         var db_ = qmd.db.Db.open(db_path) catch {
             try stdout.writeAll("Error: Database not found. Run 'zmd update' first.\n");
             try stdout.flush();
@@ -1597,7 +1597,7 @@ pub fn main(init: std.process.Init) !void {
         }
 
         var db_path_buf: [256]u8 = undefined;
-        const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}", .{DB_PATH});
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}", .{DB_PATH}, 0);
         var db_ = qmd.db.Db.open(db_path) catch {
             try stdout.writeAll("Error: Database not found. Run 'zmd update' first.\n");
             try stdout.flush();
@@ -1690,7 +1690,7 @@ pub fn main(init: std.process.Init) !void {
         }
 
         var db_path_buf: [256]u8 = undefined;
-        const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}", .{DB_PATH});
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}", .{DB_PATH}, 0);
         var db_ = qmd.db.Db.open(db_path) catch {
             try stdout.writeAll("Error: Database not found. Run 'zmd update' first.\n");
             try stdout.flush();
@@ -1782,7 +1782,7 @@ pub fn main(init: std.process.Init) !void {
         const doc_path = first_arg;
 
         var db_path_buf: [256]u8 = undefined;
-        const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}", .{DB_PATH});
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}", .{DB_PATH}, 0);
         var db_ = qmd.db.Db.open(db_path) catch {
             try stdout.writeAll("Error: Database not found.\n");
             try stdout.flush();
@@ -1842,7 +1842,7 @@ pub fn main(init: std.process.Init) !void {
         }
 
         var db_path_buf: [256]u8 = undefined;
-        const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}", .{DB_PATH});
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}", .{DB_PATH}, 0);
         var db_ = qmd.db.Db.open(db_path) catch {
             try stdout.writeAll("Error: Database not found.\n");
             try stdout.flush();
@@ -1957,7 +1957,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (std.mem.eql(u8, cmd, "status")) {
         var db_path_buf: [256]u8 = undefined;
-        const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}", .{DB_PATH});
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}", .{DB_PATH}, 0);
         var db_ = qmd.db.Db.open(db_path) catch {
             try stdout.writeAll("Database: not initialized\n");
             try stdout.writeAll("Run 'zmd update' to initialize.\n");
@@ -2002,7 +2002,7 @@ pub fn main(init: std.process.Init) !void {
         const collection_name = args.next();
 
         var db_path_buf: [256]u8 = undefined;
-        const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}", .{DB_PATH});
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}", .{DB_PATH}, 0);
         var db_ = qmd.db.Db.open(db_path) catch {
             try stdout.writeAll("Error: Database not found.\n");
             try stdout.flush();
@@ -2056,7 +2056,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (std.mem.eql(u8, cmd, "cleanup")) {
         var db_path_buf: [256]u8 = undefined;
-        const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}", .{DB_PATH});
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}", .{DB_PATH}, 0);
         var db_ = qmd.db.Db.open(db_path) catch {
             try stdout.writeAll("Error: Database not found.\n");
             try stdout.flush();
@@ -2263,7 +2263,8 @@ test "extractSnippet handles CJK Korean text" {
 
 test "extractSnippet CJK does not produce invalid UTF-8" {
     // Build a long Korean document so slicing hits non-zero start offset.
-    const prefix = "가나다라마바사아자차카타파하" ** 5; // 14 chars * 3 bytes * 5 = 210 bytes
+    const prefix = "가나다라마바사아자차카타파하" ++ "가나다라마바사아자차카타파하" ++
+        "가나다라마바사아자차카타파하" ++ "가나다라마바사아자차카타파하" ++ "가나다라마바사아자차카타파하"; // 14 chars * 3 bytes * 5 = 210 bytes
     const doc = prefix ++ "보호법에 의한 보증금 반환 청구";
     const snippet = try extractSnippet(std.testing.allocator, "보증금", doc);
     defer std.testing.allocator.free(snippet);

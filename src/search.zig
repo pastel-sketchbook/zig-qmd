@@ -437,7 +437,7 @@ fn rerankByEmbedding(db_: *db.Db, allocator: std.mem.Allocator, io: std.Io, quer
         try embed_text(allocator, query, true);
     defer allocator.free(q_emb);
 
-    // In Zig 0.16, env var access is through Init.environ_map.
+    // Env var access is through Init.environ_map.
     // Library code should receive these paths from the caller.
     const bin_path: ?[]const u8 = null;
     const model_path: ?[]const u8 = null;
@@ -727,7 +727,7 @@ fn embed_text(allocator: std.mem.Allocator, text: []const u8, is_query: bool) ![
         try llm.formatDocForEmbedding(allocator, text);
     defer allocator.free(formatted);
 
-    // In Zig 0.16, env var access is through Init.environ_map.
+    // Env var access is through Init.environ_map.
     // Library code should receive these paths from the caller.
     const bin_path: ?[]const u8 = null;
     const model_path: ?[]const u8 = null;
@@ -770,7 +770,7 @@ fn parse_embedding_json_array(allocator: std.mem.Allocator, json: []const u8) ![
 
 test "embed_query uses real model when env is set" {
     const allocator = std.testing.allocator;
-    // In Zig 0.16, env var access is through Init.environ_map.
+    // Env var access is through Init.environ_map.
     // Tests cannot easily access environment variables; skip by default.
     const maybe_model: ?[]const u8 = null;
     if (maybe_model) |_| {

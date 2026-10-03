@@ -81,9 +81,12 @@ pub const McpServer = struct {
     fn readMessage(stdin: anytype, allocator: std.mem.Allocator) ![]u8 {
         var content_length: usize = 0;
 
+        // Use the inclusive form so the '\n' is actually consumed. The exclusive
+        // variant advances only up to (but not past) the delimiter, which would
+        // leave the '\n' in the stream and corrupt the body that follows.
         while (true) {
-            const line = try stdin.takeDelimiterExclusive('\n');
-            const trimmed = std.mem.trim(u8, line, &.{'\r'});
+            const line = try stdin.takeDelimiterInclusive('\n');
+            const trimmed = std.mem.trimEnd(u8, line, "\r\n");
             if (trimmed.len == 0) break;
 
             if (std.mem.startsWith(u8, trimmed, "Content-Length:")) {
@@ -121,7 +124,9 @@ pub const McpServer = struct {
             const params = parsed.params_json orelse return McpError.InvalidParams;
             var tool_call = try parseToolCall(params, allocator);
             defer tool_call.deinit(allocator);
-            return try formatResponse(parsed.id_json, try callToolNamedAtPath(&tool_call, db_path_override orelse DB_PATH, allocator, io), allocator);
+            const result = try callToolNamedAtPath(&tool_call, db_path_override orelse DB_PATH, allocator, io);
+            defer allocator.free(result);
+            return try formatResponse(parsed.id_json, result, allocator);
         }
         if (std.mem.eql(u8, parsed.method, "initialize")) {
             return try formatResponse(parsed.id_json, getServerInfo(), allocator);
@@ -180,7 +185,7 @@ pub const McpServer = struct {
     }
 
     fn callToolNamedAtPath(tool_call: *const ParsedToolCall, db_path_raw: []const u8, allocator: std.mem.Allocator, io: std.Io) ![]u8 {
-        const db_path = allocator.dupeZ(u8, db_path_raw) catch return McpError.InvalidParams;
+        const db_path = allocator.dupeSentinel(u8, db_path_raw, 0) catch return McpError.InvalidParams;
         defer allocator.free(db_path);
 
         var db_ = db.Db.open(db_path) catch {
@@ -375,25 +380,29 @@ test "handleRequest rejects malformed params in tools/call" {
 
 test "handleRequest returns method error for unknown tool" {
     const allocator = std.testing.allocator;
-    const db_path = try setupMcpTestDb(allocator);
-    defer cleanupMcpTestDb(db_path);
+    const db_path = try setupMcpTestDb(allocator, std.testing.io);
     defer allocator.free(db_path);
+    defer cleanupMcpTestDb(db_path, std.testing.io);
 
     const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"unknown\"}}";
     try std.testing.expectError(McpError.MethodNotFound, McpServer.handleRequestWithDbPath(req, db_path, allocator, std.testing.io));
 }
 
+/// Parent directory for MCP test scratch databases.
+const TMP_ROOT = if (@import("builtin").os.tag == .windows) "TEMP" else "/tmp";
+
 const FakeReader = struct {
     data: []const u8,
     pos: usize = 0,
 
-    fn takeDelimiterExclusive(self: *FakeReader, delimiter: u8) ![]const u8 {
+    /// Mirrors std.Io.Reader.takeDelimiterInclusive: the returned slice
+    /// includes the delimiter and it is consumed.
+    fn takeDelimiterInclusive(self: *FakeReader, delimiter: u8) ![]const u8 {
         const start = self.pos;
         while (self.pos < self.data.len and self.data[self.pos] != delimiter) : (self.pos += 1) {}
         if (self.pos >= self.data.len) return error.EndOfStream;
-        const end = self.pos;
         self.pos += 1;
-        return self.data[start..end];
+        return self.data[start..self.pos];
     }
 
     fn readSliceAll(self: *FakeReader, out: []u8) !usize {
@@ -409,7 +418,7 @@ const FakeWriter = struct {
     allocator: std.mem.Allocator,
 
     fn print(self: *FakeWriter, comptime fmt: []const u8, args: anytype) !void {
-        try self.buf.writer(self.allocator).print(fmt, args);
+        try self.buf.print(self.allocator, fmt, args);
     }
 
     fn writeAll(self: *FakeWriter, data: []const u8) !void {
@@ -426,6 +435,32 @@ test "readMessage parses framed body" {
     const body = try McpServer.readMessage(&reader, std.testing.allocator);
     defer std.testing.allocator.free(body);
     try std.testing.expectEqualStrings("{\"method\":\"ping\"}", body);
+}
+
+// Uses the real std.Io.Reader rather than FakeReader so this cannot drift from
+// production semantics. std.Io.Reader.takeDelimiterExclusive advances up to but
+// not past the delimiter, so readMessage must not assume the delimiter is eaten.
+test "readMessage parses framed body from a real reader" {
+    const framed = "Content-Length: 17\r\n\r\n{\"method\":\"ping\"}";
+    var reader: std.Io.Reader = .fixed(framed);
+
+    const body = try McpServer.readMessage(&reader, std.testing.allocator);
+    defer std.testing.allocator.free(body);
+    try std.testing.expectEqualStrings("{\"method\":\"ping\"}", body);
+}
+
+// Two messages back to back: a leftover '\n' from the first must not corrupt the second.
+test "readMessage reads consecutive frames from a real reader" {
+    const framed = "Content-Length: 5\r\n\r\nfirst" ++ "Content-Length: 6\r\n\r\nsecond";
+    var reader: std.Io.Reader = .fixed(framed);
+
+    const first = try McpServer.readMessage(&reader, std.testing.allocator);
+    defer std.testing.allocator.free(first);
+    try std.testing.expectEqualStrings("first", first);
+
+    const second = try McpServer.readMessage(&reader, std.testing.allocator);
+    defer std.testing.allocator.free(second);
+    try std.testing.expectEqualStrings("second", second);
 }
 
 test "readMessage rejects missing content length" {
@@ -482,18 +517,23 @@ fn processFramedRequestForTest(request_body: []const u8, db_path_override: ?[]co
     return roundtrip;
 }
 
-fn setupMcpTestDb(allocator: std.mem.Allocator) ![]u8 {
+fn setupMcpTestDb(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
     var rnd: u64 = undefined;
-    std.crypto.random.bytes(std.mem.asBytes(&rnd));
-    const dir_path = try std.fmt.allocPrint(allocator, "/tmp/zmd-mcp-test-{x}", .{rnd});
-    errdefer allocator.free(dir_path);
-    std.fs.cwd().makeDir(dir_path) catch |err| {
+    var random_source: std.Random.IoSource = .{ .io = io };
+    random_source.interface().bytes(std.mem.asBytes(&rnd));
+    const dir_name = try std.fmt.allocPrint(allocator, "zmd-mcp-test-{x}", .{rnd});
+    defer allocator.free(dir_name);
+    std.Io.Dir.cwd().createDir(io, TMP_ROOT, .default_dir) catch |err| {
         if (err != error.PathAlreadyExists) return err;
     };
-    const db_path = try std.fmt.allocPrint(allocator, "{s}/data.db", .{dir_path});
-    allocator.free(dir_path);
+    var tmp_dir = std.Io.Dir.cwd().openDir(io, TMP_ROOT, .{}) catch |err| return err;
+    defer tmp_dir.close(io);
+    tmp_dir.createDir(io, dir_name, .default_dir) catch |err| {
+        if (err != error.PathAlreadyExists) return err;
+    };
+    const db_path = try std.fmt.allocPrint(allocator, "{s}/{s}/data.db", .{ TMP_ROOT, dir_name });
 
-    const db_path_z = try allocator.dupeZ(u8, db_path);
+    const db_path_z = try allocator.dupeSentinel(u8, db_path, 0);
     var conn = try db.Db.open(db_path_z);
     defer conn.close();
     defer allocator.free(db_path_z);
@@ -505,22 +545,30 @@ fn setupMcpTestDb(allocator: std.mem.Allocator) ![]u8 {
     return db_path;
 }
 
-fn cleanupMcpTestDb(db_path: []const u8) void {
-    std.fs.cwd().deleteFile(db_path) catch |err| {
+fn cleanupMcpTestDb(db_path: []const u8, io: std.Io) void {
+    const slash = std.mem.lastIndexOfScalar(u8, db_path, '/') orelse return;
+    const dir_name = db_path[slash + 1 .. db_path.len - ".db".len];
+
+    // Dir-relative only: Dir.cwd() rejects absolute paths, and these test dbs
+    // live under /tmp rather than the cwd.
+    var tmp_dir = std.Io.Dir.cwd().openDir(io, TMP_ROOT, .{}) catch return;
+    defer tmp_dir.close(io);
+
+    var joined_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const db_file = std.fmt.bufPrint(&joined_buf, "{s}/data.db", .{dir_name}) catch return;
+    tmp_dir.deleteFile(io, db_file) catch |err| {
         if (err != error.FileNotFound) return;
     };
-    const slash = std.mem.lastIndexOfScalar(u8, db_path, '/') orelse return;
-    const dir_path = db_path[0..slash];
-    std.fs.cwd().deleteDir(dir_path) catch |err| {
+    tmp_dir.deleteDir(io, dir_name) catch |err| {
         if (err != error.FileNotFound) return;
     };
 }
 
 test "framed tools/call status returns result envelope" {
     const allocator = std.testing.allocator;
-    const db_path = try setupMcpTestDb(allocator);
-    defer cleanupMcpTestDb(db_path);
+    const db_path = try setupMcpTestDb(allocator, std.testing.io);
     defer allocator.free(db_path);
+    defer cleanupMcpTestDb(db_path, std.testing.io);
 
     const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"status\"}}";
     const resp = try processFramedRequestForTest(req, db_path, allocator);
@@ -531,9 +579,9 @@ test "framed tools/call status returns result envelope" {
 
 test "framed tools/call query returns ranked text" {
     const allocator = std.testing.allocator;
-    const db_path = try setupMcpTestDb(allocator);
-    defer cleanupMcpTestDb(db_path);
+    const db_path = try setupMcpTestDb(allocator, std.testing.io);
     defer allocator.free(db_path);
+    defer cleanupMcpTestDb(db_path, std.testing.io);
 
     const req = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"query\",\"query\":\"hello\"}}";
     const resp = try processFramedRequestForTest(req, db_path, allocator);
@@ -544,9 +592,9 @@ test "framed tools/call query returns ranked text" {
 
 test "framed tools/call search returns fts text" {
     const allocator = std.testing.allocator;
-    const db_path = try setupMcpTestDb(allocator);
-    defer cleanupMcpTestDb(db_path);
+    const db_path = try setupMcpTestDb(allocator, std.testing.io);
     defer allocator.free(db_path);
+    defer cleanupMcpTestDb(db_path, std.testing.io);
 
     const req = "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"search\",\"query\":\"hello\",\"collection\":\"wiki\"}}";
     const resp = try processFramedRequestForTest(req, db_path, allocator);
@@ -557,9 +605,9 @@ test "framed tools/call search returns fts text" {
 
 test "framed tools/call get returns document content" {
     const allocator = std.testing.allocator;
-    const db_path = try setupMcpTestDb(allocator);
-    defer cleanupMcpTestDb(db_path);
+    const db_path = try setupMcpTestDb(allocator, std.testing.io);
     defer allocator.free(db_path);
+    defer cleanupMcpTestDb(db_path, std.testing.io);
 
     const req = "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"get\",\"path\":\"wiki/a.md\"}}";
     const resp = try processFramedRequestForTest(req, db_path, allocator);
@@ -570,9 +618,9 @@ test "framed tools/call get returns document content" {
 
 test "framed tools/call supports MCP arguments object" {
     const allocator = std.testing.allocator;
-    const db_path = try setupMcpTestDb(allocator);
-    defer cleanupMcpTestDb(db_path);
+    const db_path = try setupMcpTestDb(allocator, std.testing.io);
     defer allocator.free(db_path);
+    defer cleanupMcpTestDb(db_path, std.testing.io);
 
     const req = "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{\"name\":\"search\",\"arguments\":{\"query\":\"hello\",\"collection\":\"wiki\"}}}";
     const resp = try processFramedRequestForTest(req, db_path, allocator);

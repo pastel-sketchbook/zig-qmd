@@ -20,7 +20,9 @@ case "$PART" in
 esac
 
 printf '%s\n' "$NEXT" > VERSION
-perl -pi -e "s/\\.version = \"$CURRENT\"/.version = \"$NEXT\"/" build.zig.zon
+# Match any existing version rather than $CURRENT, otherwise a drifted
+# build.zig.zon silently keeps its stale value.
+perl -pi -e "s/\\.version = \"[^\"]*\"/.version = \"$NEXT\"/" build.zig.zon
 git add VERSION build.zig.zon
 git commit -m "chore: bump version to $NEXT"
 git tag "v$NEXT"

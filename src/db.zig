@@ -21,8 +21,8 @@ pub const Db = struct {
 
     /// Fixed-capacity cache for prepared statements keyed by SQL string pointer.
     /// Avoids repeated sqlite3_prepare_v2 calls for the same SQL in hot loops.
-    cache_sql: [STMT_CACHE_CAP]?[*:0]const u8 = [_]?[*:0]const u8{null} ** STMT_CACHE_CAP,
-    cache_stmt: [STMT_CACHE_CAP]?*c.sqlite3_stmt = [_]?*c.sqlite3_stmt{null} ** STMT_CACHE_CAP,
+    cache_sql: [STMT_CACHE_CAP]?[*:0]const u8 = @splat(null),
+    cache_stmt: [STMT_CACHE_CAP]?*c.sqlite3_stmt = @splat(null),
     cache_len: usize = 0,
 
     /// Open (or create) a database at `path`. Use ":memory:" for in-memory.
@@ -377,7 +377,7 @@ test "initSchema creates all tables" {
 
     for (tables) |table_name| {
         var buf: [256]u8 = undefined;
-        const query = try std.fmt.bufPrintZ(&buf, "SELECT count(*) FROM sqlite_master WHERE name = '{s}'", .{table_name});
+        const query = try std.fmt.bufPrintSentinel(&buf, "SELECT count(*) FROM sqlite_master WHERE name = '{s}'", .{table_name}, 0);
         var stmt = try db.prepare(query);
         defer stmt.finalize();
         const has_row = try stmt.step();
